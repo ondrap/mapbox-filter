@@ -6,7 +6,6 @@
 module Mapbox.Expression (
     TExp(..)
   , TTyp(..)
-  , TOrderable(..)
   , UExp
   , typeCheckFilter
   , AnyValue(..)
@@ -140,13 +139,9 @@ instance Show (TValue a) where
   showsPrec _ TVStr    = showString "String"
   showsPrec _ TVNumArr = showString "NumArray"
 
-data TOrderable a where
-  TONum :: TOrderable Scientific
-  TOStr :: TOrderable T.Text
-
-instance Show (TOrderable a) where
-  showsPrec _ TONum = showString "Number"
-  showsPrec _ TOStr = showString "String"
+class TOrderable a
+instance TOrderable Scientific
+instance TOrderable T.Text
 
 data ATExp = forall a . TExp a ::: TTyp a
 instance Show ATExp where
@@ -157,8 +152,8 @@ data TExp a where
   TStr :: T.Text -> TExp T.Text
   TBool :: Bool -> TExp Bool
   TNumArr :: NumArray -> TExp NumArray
-  TCmpOp :: CmpOp -> TTyp a -> TExp a -> TExp a -> TExp Bool
-  TOrdOp :: OrdOp -> TOrderable a -> TExp a -> TExp a -> TExp Bool
+  TCmpOp :: Eq a => CmpOp -> TExp a -> TExp a -> TExp Bool
+  TOrdOp :: (Ord a, TOrderable a) => OrdOp -> TExp a -> TExp a -> TExp Bool
   TBoolFunc :: BoolFunc -> [TExp Bool] -> TExp Bool
   TReadMeta :: TExp T.Text -> TExp AnyValue
   TCheckMeta :: TExp T.Text -> TExp Bool
@@ -171,9 +166,9 @@ instance Show (TExp a) where
   showsPrec p (TBool b) = showsPrec p b
   showsPrec p (TStr s) = showsPrec p s
   showsPrec p (TNumArr n) = showsPrec p n
-  showsPrec p (TCmpOp _ _ e1 e2) =
+  showsPrec p (TCmpOp _ e1 e2) =
     showString "(" . showsPrec p e1 . showString " == " . showsPrec p e2 . showString ")"
-  showsPrec p (TOrdOp op _ n1 n2) =
+  showsPrec p (TOrdOp op n1 n2) =
     showString "(" . showsPrec p op . showString " " . showsPrec p n1 . showString " " . showsPrec p n2 . showString ")"
   showsPrec p (TBoolFunc func fncs) = showsPrec p func . showString " " . showsPrec p fncs
   showsPrec p (TReadMeta var) = showString "readMeta " . showsPrec p var
@@ -230,11 +225,11 @@ typeCheck env (UApp fname args) =
             case testEquality t1 t2 of
               Just Refl ->
                 case t1 of
-                  TTStr -> return (TCmpOp op TTStr marg1 marg2 ::: TTBool)
-                  TTNum -> return (TCmpOp op TTNum marg1 marg2 ::: TTBool)
-                  TTBool -> return (TCmpOp op TTBool marg1 marg2 ::: TTBool)
-                  TTNumArr -> return (TCmpOp op TTNumArr marg1 marg2 ::: TTBool)
-                  TTAny -> return (TCmpOp op TTAny marg1 marg2 ::: TTBool)
+                  TTStr    -> return (TCmpOp op marg1 marg2 ::: TTBool)
+                  TTNum    -> return (TCmpOp op marg1 marg2 ::: TTBool)
+                  TTBool   -> return (TCmpOp op marg1 marg2 ::: TTBool)
+                  TTNumArr -> return (TCmpOp op marg1 marg2 ::: TTBool)
+                  TTAny    -> return (TCmpOp op marg1 marg2 ::: TTBool)
               Nothing -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
                             <> ": " <> show t1 <> "vs. " <> show t2)
     _| Just op <- lookup fname [("<", CLt), ("<=", CLeq), (">", CGt), (">=", CGeq)],
@@ -244,8 +239,8 @@ typeCheck env (UApp fname args) =
             case testEquality t1 t2 of
               Just Refl ->
                 case t1 of
-                  TTStr -> return (TOrdOp op TOStr marg1 marg2 ::: TTBool)
-                  TTNum -> return (TOrdOp op TONum marg1 marg2 ::: TTBool)
+                  TTStr -> return (TOrdOp op marg1 marg2 ::: TTBool)
+                  TTNum -> return (TOrdOp op marg1 marg2 ::: TTBool)
                   _     -> Left "Cannot compare other than str/num"
               Nothing -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
                               <> ": " <> show t1 <> "vs. " <> show t2)

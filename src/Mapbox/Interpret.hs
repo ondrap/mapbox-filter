@@ -27,8 +27,8 @@ import           Geography.VectorTile       (Feature (..), Val (..))
 import           Mapbox.Expression          (ATExp (..), AnyValue (..),
                                              AttrType (..), BoolFunc (..),
                                              CmpOp (..), OrdOp (..), TExp (..),
-                                             TOrderable (..), TTyp (..),
-                                             anyValToTVal, tValToTTyp)
+                                             TTyp (..), anyValToTVal,
+                                             tValToTTyp)
 
 data FeatureType = Point | LineString | Polygon
   deriving (Show)
@@ -92,28 +92,21 @@ compileExpr (TBoolFunc bf exprs) = do
   case bf of
     BAny -> return (or barr)
     BAll -> return (and barr)
-compileExpr (TCmpOp op ttyp e1 e2) = do
+compileExpr (TCmpOp op e1 e2) = do
     -- We have to handle 'nulls' correctly in comparisons
     env <- ask
     let v1 = runReaderT (compileExpr e1) env
     let v2 = runReaderT (compileExpr e2) env
-    return $ case ttyp of
-      TTBool   -> top v1 v2
-      TTStr    -> top v1 v2
-      TTNum    -> top v1 v2
-      TTNumArr -> top v1 v2
-      TTAny    -> top v1 v2
+    return (top v1 v2)
   where
     top :: Eq a => Maybe a -> Maybe a -> Bool
     top = case op of
       CEq  -> (==)
       CNeq -> (/=)
-compileExpr (TOrdOp op ttyp e1 e2) = do
+compileExpr (TOrdOp op e1 e2) = do
     v1 <- compileExpr e1
     v2 <- compileExpr e2
-    return $ case ttyp of
-        TOStr -> top v1 v2
-        TONum -> top v1 v2
+    return (top v1 v2)
   where
     top :: Ord a => a -> a -> Bool
     top = case op of
