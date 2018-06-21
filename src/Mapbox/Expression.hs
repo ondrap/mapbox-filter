@@ -3,7 +3,11 @@
 {-# LANGUAGE GADTs                     #-}
 {-# LANGUAGE OverloadedStrings         #-}
 
-module Mapbox.Expression where
+module Mapbox.Expression (
+    TExp
+  , UExp
+  , typeCheckFilter
+) where
 
 import           Control.Applicative ((<|>))
 import           Control.Monad       ((>=>))
@@ -131,6 +135,8 @@ data TExp a where
   TOrdOp :: OrdOp -> TOrderable a -> TExp a -> TExp a -> TExp Bool
   TBoolFunc :: BoolFunc -> [TExp Bool] -> TExp Bool
   TReadMeta :: TExp T.Text -> TExp AnyValue
+  TCheckMeta :: TExp T.Text -> TExp Bool
+  TNegate :: TExp Bool -> TExp Bool
   TConvert :: Bool -> TValue a -> [ATExp] -> TExp a
   TReadAttr :: AttrType -> TExp T.Text
 
@@ -145,6 +151,8 @@ instance Show (TExp a) where
     showString "(" . showsPrec p op . showString " " . showsPrec p n1 . showString " " . showsPrec p n2 . showString ")"
   showsPrec p (TBoolFunc func fncs) = showsPrec p func . showString " " . showsPrec p fncs
   showsPrec p (TReadMeta var) = showString "readMeta " . showsPrec p var
+  showsPrec p (TNegate e) = showString "!(" . showsPrec p e . showString ")"
+  showsPrec p (TCheckMeta var) = showString "hasMeta " . showsPrec p var
   showsPrec p (TConvert force restype exprs) =
     showsPrec p exprs . showString " ->" . bool (showString " ") (showString "! ") force . showsPrec p restype
   showsPrec p (TReadAttr atype) = showString "attr " . showsPrec p atype
@@ -174,12 +182,21 @@ typeCheck env (UApp fname args) =
     "string" -> do
         eargs <- traverse (typeCheck env) args
         return (TConvert False TVStr eargs ::: TTStr)
+    "number" -> do
+        eargs <- traverse (typeCheck env) args
+        return (TConvert False TVNum eargs ::: TTNum)
     "boolean" -> do
-      eargs <- traverse (typeCheck env) args
-      return (TConvert False TVBool eargs ::: TTBool)
+        eargs <- traverse (typeCheck env) args
+        return (TConvert False TVBool eargs ::: TTBool)
     "get" | [arg] <- args -> do
-             mname <- typeCheck env arg >>= forceType TTStr
-             return (TReadMeta mname ::: TTAny)
+        mname <- typeCheck env arg >>= forceType TTStr
+        return (TReadMeta mname ::: TTAny)
+    "!" | [arg] <- args -> do
+        mexpr <- typeCheck env arg >>= forceType TTBool
+        return (TNegate mexpr ::: TTBool)
+    "has" | [arg] <- args -> do
+        mname <- typeCheck env arg >>= forceType TTStr
+        return (TCheckMeta mname ::: TTBool)
     _| fname `elem` ["==", "!="], [arg1, arg2] <- args -> do
             (marg1 ::: t1) <- typeCheck env arg1
             (marg2 ::: t2) <- typeCheck env arg2
@@ -193,8 +210,27 @@ typeCheck env (UApp fname args) =
                   TTNumArr -> return (TCmpOp op TVNumArr marg1 marg2 ::: TTBool)
                   TTAny -> fail "Cannot compare unknown types"
               Nothing -> fail "Comparing unequal things."
+    _| Just op <- lookup fname [("<", CLt), ("<=", CLeq), (">", CGt), (">=", CGeq)],
+        [arg1, arg2] <- args -> do
+            (marg1 ::: t1) <- typeCheck env arg1
+            (marg2 ::: t2) <- typeCheck env arg2
+            case testEquality t1 t2 of
+              Just Refl ->
+                case t1 of
+                  TTStr -> return (TOrdOp op TOStr marg1 marg2 ::: TTBool)
+                  TTNum -> return (TOrdOp op TONum marg1 marg2 ::: TTBool)
+                  _     -> fail "Cannot compare other than str/num"
+              Nothing -> fail "Comparing unequal things."
     _| fname `elem` ["any", "all"] -> do
         margs <- traverse (typeCheck env >=> forceType TTBool) args
         return (TBoolFunc (if fname == "any" then BAny else BAll) margs ::: TTBool)
     "geometry-type" | [] <- args -> return (TReadAttr GeometryType ::: TTStr)
     _     -> Left ("Unknown function name / wrong param count: " <> fname)
+
+
+typeCheckFilter :: UExp -> Either String (TExp Bool)
+typeCheckFilter uexp =
+  case typeCheck mempty uexp of
+    Right (mexp ::: TTBool) -> return mexp
+    Right (_ ::: otype) -> Left ("Expression has a type " <> show otype <> ", expected Bool")
+    Left err -> Left (T.unpack err)

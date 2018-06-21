@@ -33,6 +33,7 @@ library
     , vector
   exposed-modules:
       Mapbox.Expression
+      Mapbox.Style
   default-language: Haskell2010
   ghc-options: -Wall
 
