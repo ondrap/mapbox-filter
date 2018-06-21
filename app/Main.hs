@@ -1,8 +1,10 @@
-{-# LANGUAGE NamedFieldPuns    #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
+import           Codec.Compression.GZip  (compress, decompress)
 import           Control.Applicative     (liftA2)
 import           Control.Lens            (filtered, over, toListOf, (&), (^.),
                                           (^..))
@@ -20,6 +22,8 @@ import           Data.String.Conversions (cs)
 import qualified Data.Text               as T
 import qualified Data.Text.IO            as T
 import qualified Data.Vector             as V
+import           Database.SQLite.Simple  (Only (..), execute, query, query_,
+                                          withConnection, withTransaction)
 import           Geography.VectorTile    (Layer, VectorTile, layers,
                                           linestrings, metadata, name, points,
                                           polygons, tile, untile)
@@ -82,7 +86,7 @@ cmdLineParser  :: Parser CmdLine
 cmdLineParser =
   subparser $
     command "dump" (info (helper <*> dumpOptions) (progDesc "Dump vector files contents."))
-    <> command "filterMbtiles" (info (helper <*> mbtileOptions) (progDesc "Run filtering on a MBTiles database"))
+    <> command "shrink" (info (helper <*> mbtileOptions) (progDesc "Run filtering on a MBTiles database"))
 
 progOpts :: ParserInfo CmdLine
 progOpts = info (cmdLineParser <**> helper)
@@ -102,7 +106,7 @@ checkStyle styl tilesrc = do
   -- Print vector styles
   let sources = nub (styl ^.. msLayers . traverse . lSource)
   for_ sources $ \s ->
-    T.putStrLn $ "Source layer: " <> s
+    T.putStrLn $ "Found source layer: " <> s
   when (tilesrc `notElem` sources) $
     error "Invalid tile source specified"
 
@@ -129,6 +133,24 @@ dumpPbf style tilesrc zoom fp = do
       let include = runFilter lfilter ptype feature
       putStrLn $ bool "- " "  " include <> show ptype <> " " <> show (feature ^. metadata)
 
+convertMbtiles :: MapboxStyle -> T.Text -> FilePath -> IO ()
+convertMbtiles style tilesrc fp =
+  withConnection fp $ \conn -> do
+    zlevels <- query_ conn "select distinct zoom_level from map order by zoom_level"
+    for_ zlevels $ \(Only zoom) -> do
+      putStrLn $ "Shrinking zoom: " <> show zoom
+      let filtList = styleToSlist tilesrc zoom style
+
+      (tiles :: [Only T.Text]) <- query conn "select tile_id from map where zoom_level=?" (Only zoom)
+      putStrLn $ "Tiles: " <> show (length tiles)
+      for_ tiles $ \(Only tileid) -> do
+        [Only (tdata :: BL.ByteString)] <- query conn "select tile_data from images where tile_id=?" (Only tileid)
+        case tile (cs $ decompress tdata) of
+          Left err -> putStrLn $ "Error when decoding tile " <> show tileid <> ": " <> cs err
+          Right vtile -> do
+            let restile = filterVectorTile filtList vtile
+            execute conn "update images set tile_data=? where tile_id=?" (compress (cs $ untile restile), tileid)
+
 main :: IO ()
 main = do
   opts <- execParser progOpts
@@ -139,3 +161,4 @@ main = do
 
   case opts of
     CmdDump{fMvtSource, fZoomLevel} -> dumpPbf style tilesrc fZoomLevel fMvtSource
+    CmdMbtiles{fMbtiles} -> convertMbtiles style tilesrc fMbtiles
