@@ -19,17 +19,18 @@ module Mapbox.Expression (
   , anyValToTVal
 ) where
 
-import           Control.Applicative ((<|>))
-import           Control.Monad       ((>=>))
-import           Data.Aeson          (FromJSON (..))
-import qualified Data.Aeson          as AE
-import           Data.Bool           (bool)
-import qualified Data.HashMap.Strict as HMap
-import           Data.Monoid         ((<>))
-import           Data.Scientific     (Scientific)
-import qualified Data.Text           as T
-import           Data.Type.Equality  ((:~:) (..), TestEquality (..))
-import qualified Data.Vector         as V
+import           Control.Applicative     ((<|>))
+import           Control.Monad           ((>=>))
+import           Data.Aeson              (FromJSON (..))
+import qualified Data.Aeson              as AE
+import           Data.Bool               (bool)
+import qualified Data.HashMap.Strict     as HMap
+import           Data.Monoid             ((<>))
+import           Data.Scientific         (Scientific)
+import           Data.String.Conversions (cs)
+import qualified Data.Text               as T
+import           Data.Type.Equality      ((:~:) (..), TestEquality (..))
+import qualified Data.Vector             as V
 
 type Id = T.Text
 type NumArray = V.Vector Scientific
@@ -234,7 +235,7 @@ typeCheck env (UApp fname args) =
                   TTBool -> return (TCmpOp op TTBool marg1 marg2 ::: TTBool)
                   TTNumArr -> return (TCmpOp op TTNumArr marg1 marg2 ::: TTBool)
                   TTAny -> return (TCmpOp op TTAny marg1 marg2 ::: TTBool)
-              Nothing -> fail ("Comparing unequal things: " <> show arg1 <> ", " <> show arg2
+              Nothing -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
                             <> ": " <> show t1 <> "vs. " <> show t2)
     _| Just op <- lookup fname [("<", CLt), ("<=", CLeq), (">", CGt), (">=", CGeq)],
         [arg1, arg2] <- args -> do
@@ -245,8 +246,8 @@ typeCheck env (UApp fname args) =
                 case t1 of
                   TTStr -> return (TOrdOp op TOStr marg1 marg2 ::: TTBool)
                   TTNum -> return (TOrdOp op TONum marg1 marg2 ::: TTBool)
-                  _     -> fail "Cannot compare other than str/num"
-              Nothing -> fail ("Comparing unequal things: " <> show arg1 <> ", " <> show arg2
+                  _     -> Left "Cannot compare other than str/num"
+              Nothing -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
                               <> ": " <> show t1 <> "vs. " <> show t2)
     _| fname `elem` ["any", "all"] -> do
         margs <- traverse (typeCheck env >=> forceType TTBool) args
