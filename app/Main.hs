@@ -9,16 +9,18 @@ import           Control.Monad.Trans.Class            (lift)
 
 import           Control.Concurrent.ParallelIO.Global (parallel_,
                                                        stopGlobalPool)
+import           Control.Exception.Safe               (catchAny)
 import           Control.Lens                         (filtered, over, toListOf,
                                                        (&), (^.), (^..))
 import           Control.Monad                        (when)
+import           Control.Monad.IO.Class               (liftIO)
 import qualified Data.Aeson                           as AE
 import           Data.Bool                            (bool)
 import qualified Data.ByteString                      as BS
 import qualified Data.ByteString.Lazy                 as BL
 import           Data.Foldable                        (for_)
 import qualified Data.HashMap.Strict                  as HMap
-import           Data.List                            (foldl', nub)
+import           Data.List                            (nub)
 import           Data.Maybe                           (fromMaybe)
 import           Data.Semigroup                       ((<>))
 import           Data.String.Conversions              (cs)
@@ -33,6 +35,12 @@ import           Geography.VectorTile                 (Layer, VectorTile,
                                                        metadata, name, points,
                                                        polygons, tile, untile)
 import           Options.Applicative                  hiding (style)
+import           System.Posix.Files                   (getFileStatus,
+                                                       modificationTime)
+import           System.Posix.Types                   (EpochTime)
+import           Web.Scotty                           (addHeader, get, json,
+                                                       next, param, raise, raw,
+                                                       scotty, setHeader)
 
 import           Mapbox.Interpret                     (CompiledExpr,
                                                        FeatureType (..),
@@ -93,6 +101,13 @@ data CmdLine =
     , fSourceName :: T.Text
     , fMbtiles    :: FilePath
   }
+  | CmdWebServer {
+      fModStyle   :: Maybe FilePath
+    , fSourceName :: T.Text
+    , fWebPort    :: Int
+    , fLazyUpdate :: Bool
+    , fMbtiles    :: FilePath
+  }
 
 dumpOptions :: Parser CmdLine
 dumpOptions = CmdDump <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
@@ -105,11 +120,19 @@ mbtileOptions = CmdMbtiles <$> strOption (short 'j' <> long "style" <> help "JSO
                            <*> (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
                            <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
+webOptions :: Parser CmdLine
+webOptions = CmdWebServer <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
+                          <*> (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+                          <*> option auto (short 'p' <> long "port" <> help "Web port number")
+                          <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with shrinked data")
+                          <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
+
 cmdLineParser  :: Parser CmdLine
 cmdLineParser =
   subparser $
     command "dump" (info (helper <*> dumpOptions) (progDesc "Dump vector files contents."))
     <> command "shrink" (info (helper <*> mbtileOptions) (progDesc "Run filtering on a MBTiles database"))
+    <> command "web" (info (helper <*> webOptions) (progDesc "Run a web server for serving tiles"))
 
 progOpts :: ParserInfo CmdLine
 progOpts = info (cmdLineParser <**> helper)
@@ -131,7 +154,7 @@ checkStyle styl tilesrc = do
   for_ sources $ \s ->
     T.putStrLn $ "Found source layer: " <> s
   when (tilesrc `notElem` sources) $
-    error "Invalid tile source specified"
+    error ("Invalid tile source specified, " <> show tilesrc <> " not found")
 
 dumpPbf :: MapboxStyle -> T.Text -> Int -> FilePath -> IO ()
 dumpPbf style tilesrc zoom fp = do
@@ -176,14 +199,91 @@ convertMbtiles style tilesrc fp =
           let restile = filterVectorTile filtList vtile
           execute conn "update images set tile_data=? where tile_id=?" (compress (cs (untile restile)), tileid)
 
+runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> T.Text -> FilePath -> Bool -> IO ()
+runWebServer port mstyle tilesrc mbpath lazyUpdate =
+  withConnection mbpath $ \conn -> do
+    -- If lazy, add a column to a table
+    when lazyUpdate $
+      execute_ conn "alter table images add column shrinked default 0"
+        `catchAny` \_ -> return ()
+
+    -- Generate a JSON to be included as a metadata file
+    scotty port $ do
+      get "/metadata.json" $ do
+          json ["tes" :: String]
+      get "/:mt1/:z/:x/:y" $ do
+          z :: Int <- param "z"
+          x :: Int <- param "x"
+          y :: Int <- param "y"
+          let tms_y = 2 ^ z - y - 1
+
+          mnewtile <- case (mstyle, lazyUpdate) of
+              (Just (style,_), True) -> getLazyTile conn style z x tms_y
+              _                      -> getTile conn z x tms_y
+
+          addHeader "Access-Control-Allow-Origin" "*"
+          setHeader "Content-Type" "application/x-protobuf"
+
+          case mnewtile of
+            Just dta -> do
+              addHeader "Content-Encoding" "gzip"
+              raw dta
+            Nothing -> raw ""
+  where
+    -- Get tile from modified database; if not already shrinked, shrink it and write to the database
+    getLazyTile conn style z x tms_y = do
+      rows <- liftIO $ query conn "select tile_data, map.tile_id, shrinked from images,map where zoom_level=? AND tile_column=? AND tile_row=? AND map.tile_id=images.tile_id"
+                (z, x, tms_y)
+      case rows of
+        [(dta, _, 1 :: Int)] -> return (Just dta)
+        [(dta, tileid :: T.Text, _)] -> do
+            -- Shrink
+            let cstyles = styleToCFilters tilesrc z style
+            case tile (cs (decompress dta)) of
+              Left err -> raise (cs err)
+              Right dtile -> do
+                let newdta = compress . cs . untile . filterVectorTile cstyles $ dtile
+                liftIO $ execute conn "update images set tile_data=?,shrinked=1 where tile_id=?"
+                              (newdta, tileid)
+                return $ Just newdta
+        _ -> return Nothing
+
+    -- Ordinarily get tile from database; if styling enabled, do the styling
+    getTile conn z x tms_y = do
+      rows <- liftIO $ query conn "select tile_data from tiles where zoom_level=? AND tile_column=? AND tile_row=?"
+                      (z, x, tms_y)
+      case rows of
+        [Only dta] ->
+          case mstyle of
+            Nothing -> return (Just dta)
+            Just (style,_) -> do
+              -- Shrink
+              let cstyles = styleToCFilters tilesrc z style
+              case tile (cs (decompress dta)) of
+                Left err -> raise (cs err)
+                Right dtile -> return $ Just (compress . cs . untile . filterVectorTile cstyles $ dtile)
+        _ -> return Nothing
+
 main :: IO ()
 main = do
   opts <- execParser progOpts
-
-  style <- getStyle (fStyle opts)
   let tilesrc = fSourceName opts
-  checkStyle style tilesrc
 
   case opts of
-    CmdDump{fMvtSource, fZoomLevel} -> dumpPbf style tilesrc fZoomLevel fMvtSource
-    CmdMbtiles{fMbtiles} -> convertMbtiles style tilesrc fMbtiles
+    CmdDump{fMvtSource, fZoomLevel, fStyle} -> do
+        style <- getStyle fStyle
+        checkStyle style tilesrc
+        dumpPbf style tilesrc fZoomLevel fMvtSource
+    CmdMbtiles{fMbtiles, fStyle} -> do
+        style <- getStyle fStyle
+        checkStyle style tilesrc
+        convertMbtiles style tilesrc fMbtiles
+    CmdWebServer{fModStyle, fWebPort, fMbtiles, fLazyUpdate} -> do
+        mstyle <- case fModStyle of
+            Nothing -> return Nothing
+            Just fp -> do
+              st <- getStyle fp
+              checkStyle st tilesrc
+              fstat <- getFileStatus fp
+              return (Just (st, modificationTime fstat))
+        runWebServer fWebPort mstyle tilesrc fMbtiles fLazyUpdate
