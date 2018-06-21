@@ -108,7 +108,7 @@ checkStyle styl tilesrc = do
 
 dumpPbf :: MapboxStyle -> T.Text -> Int -> FilePath -> IO ()
 dumpPbf style tilesrc zoom fp = do
-  mvt <- BS.readFile "10729.pbf"
+  mvt <- BS.readFile fp
   case tile mvt of
     Left err -> error (show err)
     Right vtile ->
