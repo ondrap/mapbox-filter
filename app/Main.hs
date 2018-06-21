@@ -2,10 +2,12 @@
 module Main where
 
 import           Control.Applicative     (liftA2)
-import           Control.Lens            (filtered, over, toListOf, (&), (^.))
+import           Control.Lens            (filtered, over, toListOf, (&), (^.),
+                                          (^..))
 import qualified Data.Aeson              as AE
 import qualified Data.ByteString         as BS
 import qualified Data.ByteString.Lazy    as BL
+import           Data.Foldable           (for_)
 import qualified Data.HashMap.Strict     as HMap
 import           Data.List               (foldl')
 import           Data.Maybe              (fromMaybe)
@@ -31,7 +33,7 @@ filterVectorTile slist = over (layers . traverse) runLayerFilter
            & over linestrings (V.filter (runFilter lfilter LineString))
            & over polygons (V.filter (runFilter lfilter Polygon))
     layerFilters :: HMap.HashMap BL.ByteString (CompiledExpr Bool)
-    layerFilters = foldl' (\hm (k,v) -> HMap.insertWith (liftA2 (&&)) (cs k) v hm) mempty slist
+    layerFilters = foldl' (\hm (k,v) -> HMap.insertWith (liftA2 (||)) (cs k) v hm) mempty slist
 
 -- | Convert style to a list of (source_layer, filter)
 styleToSlist :: T.Text -> MapboxStyle -> [(T.Text, CompiledExpr Bool)]
@@ -44,17 +46,24 @@ main = do
   bstyle <- BS.readFile "openmaptiles.json.js"
   let Just style = AE.decodeStrict bstyle
 
-  mvt <- BS.readFile "2681.pbf"
+  mvt <- BS.readFile "10729.pbf"
   case tile mvt of
     Left err -> error (show err)
     Right vtile -> do
       -- Print statistics
-      print (length (vtile ^. layers . traverse . points))
-      print (length (vtile ^. layers . traverse . linestrings))
-      print (length (vtile ^. layers . traverse . polygons))
+      -- print (length (vtile ^. layers . traverse . points))
+      -- print (length (vtile ^. layers . traverse . linestrings))
+      -- print (length (vtile ^. layers . traverse . polygons))
+      for_ (vtile ^.. layers . traverse) $ \l -> do
+        print (l ^. name)
+        print ((l ^. linestrings))
+
       let slist = styleToSlist "openmaptiles" style
           res = filterVectorTile slist vtile
-      print (length (res ^. layers . traverse . points))
-      print (length (res ^. layers . traverse . linestrings))
-      print (length (res ^. layers . traverse . polygons))
-      BS.writeFile "2681-new.pbf" (untile res)
+      -- print (length (res ^. layers . traverse . points))
+      -- print (length (res ^. layers . traverse . linestrings))
+      print "-----------------------------------------"
+      for_ (res ^.. layers . traverse) $ \l -> do
+            print (l ^. name)
+            print ((l ^. linestrings))
+      BS.writeFile "10729-new.pbf" (untile res)
