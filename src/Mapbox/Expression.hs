@@ -79,6 +79,7 @@ data AnyValue =
   | ANum Scientific
   | AStr T.Text
   | ANumArray NumArray
+  | ANull
   deriving (Show)
 
 data TTyp a where
@@ -131,7 +132,7 @@ data TExp a where
   TStr :: T.Text -> TExp T.Text
   TBool :: Bool -> TExp Bool
   TNumArr :: NumArray -> TExp NumArray
-  TCmpOp :: CmpOp -> TValue a -> TExp a -> TExp a -> TExp Bool
+  TCmpOp :: CmpOp -> TTyp a -> TExp a -> TExp a -> TExp Bool
   TOrdOp :: OrdOp -> TOrderable a -> TExp a -> TExp a -> TExp Bool
   TBoolFunc :: BoolFunc -> [TExp Bool] -> TExp Bool
   TReadMeta :: TExp T.Text -> TExp AnyValue
@@ -204,12 +205,13 @@ typeCheck env (UApp fname args) =
             case testEquality t1 t2 of
               Just Refl ->
                 case t1 of
-                  TTStr -> return (TCmpOp op TVStr marg1 marg2 ::: TTBool)
-                  TTNum -> return (TCmpOp op TVNum marg1 marg2 ::: TTBool)
-                  TTBool -> return (TCmpOp op TVBool marg1 marg2 ::: TTBool)
-                  TTNumArr -> return (TCmpOp op TVNumArr marg1 marg2 ::: TTBool)
-                  TTAny -> fail "Cannot compare unknown types"
-              Nothing -> fail "Comparing unequal things."
+                  TTStr -> return (TCmpOp op TTStr marg1 marg2 ::: TTBool)
+                  TTNum -> return (TCmpOp op TTNum marg1 marg2 ::: TTBool)
+                  TTBool -> return (TCmpOp op TTBool marg1 marg2 ::: TTBool)
+                  TTNumArr -> return (TCmpOp op TTNumArr marg1 marg2 ::: TTBool)
+                  TTAny -> return (TCmpOp op TTAny marg1 marg2 ::: TTBool)
+              Nothing -> fail ("Comparing unequal things: " <> show arg1 <> ", " <> show arg2
+                            <> ": " <> show t1 <> "vs. " <> show t2)
     _| Just op <- lookup fname [("<", CLt), ("<=", CLeq), (">", CGt), (">=", CGeq)],
         [arg1, arg2] <- args -> do
             (marg1 ::: t1) <- typeCheck env arg1
@@ -220,7 +222,8 @@ typeCheck env (UApp fname args) =
                   TTStr -> return (TOrdOp op TOStr marg1 marg2 ::: TTBool)
                   TTNum -> return (TOrdOp op TONum marg1 marg2 ::: TTBool)
                   _     -> fail "Cannot compare other than str/num"
-              Nothing -> fail "Comparing unequal things."
+              Nothing -> fail ("Comparing unequal things: " <> show arg1 <> ", " <> show arg2
+                              <> ": " <> show t1 <> "vs. " <> show t2)
     _| fname `elem` ["any", "all"] -> do
         margs <- traverse (typeCheck env >=> forceType TTBool) args
         return (TBoolFunc (if fname == "any" then BAny else BAll) margs ::: TTBool)
