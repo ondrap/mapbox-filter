@@ -5,7 +5,8 @@
 module Main where
 
 import           Codec.Compression.GZip               (compress, decompress)
-import           Control.Applicative                  (liftA2)
+import           Control.Monad.Trans.Class            (lift)
+
 import           Control.Concurrent.ParallelIO.Global (parallel_,
                                                        stopGlobalPool)
 import           Control.Lens                         (filtered, over, toListOf,
@@ -55,7 +56,12 @@ filterVectorTile slist =
            & over linestrings (V.filter (runFilter lfilter LineString))
            & over polygons (V.filter (runFilter lfilter Polygon))
     layerFilters :: HMap.HashMap BL.ByteString (CompiledExpr Bool)
-    layerFilters = HMap.fromListWith (liftA2 (||)) slist
+    layerFilters = HMap.fromListWith combineFilters slist
+
+-- 'Or' on expressions, but if first fails, still try the second
+combineFilters :: CompiledExpr Bool -> CompiledExpr Bool -> CompiledExpr Bool
+combineFilters fa fb = (fa >>= bool (lift Nothing) (return True)) <|> fb
+
 
 -- | Convert style and zoom level to a list of (source_layer, filter)
 styleToSlist :: T.Text -> Int -> MapboxStyle -> [(BL.ByteString, CompiledExpr Bool)]
@@ -137,7 +143,7 @@ dumpPbf style tilesrc zoom fp = do
     slist = styleToSlist tilesrc zoom style
 
     layerFilters :: HMap.HashMap BL.ByteString (CompiledExpr Bool)
-    layerFilters = foldl' (\hm (k,v) -> HMap.insertWith (liftA2 (||)) (cs k) v hm) mempty slist
+    layerFilters = foldl' (\hm (k,v) -> HMap.insertWith combineFilters (cs k) v hm) mempty slist
 
     printCont lfilter ptype feature = do
       let include = runFilter lfilter ptype feature
