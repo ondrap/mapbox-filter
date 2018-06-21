@@ -40,8 +40,9 @@ import           Mapbox.Style                         (MapboxStyle, lSource,
                                                        msLayers, _VectorLayer)
 
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
-filterVectorTile :: [(T.Text, CompiledExpr Bool)] -> VectorTile -> VectorTile
-filterVectorTile slist = over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
+filterVectorTile :: [(BL.ByteString, CompiledExpr Bool)] -> VectorTile -> VectorTile
+filterVectorTile slist =
+    over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
   where
     nullLayer l = null (l ^. points)
                   && null (l ^. linestrings)
@@ -54,12 +55,12 @@ filterVectorTile slist = over layers (HMap.filter (not . nullLayer)) . over (lay
            & over linestrings (V.filter (runFilter lfilter LineString))
            & over polygons (V.filter (runFilter lfilter Polygon))
     layerFilters :: HMap.HashMap BL.ByteString (CompiledExpr Bool)
-    layerFilters = foldl' (\hm (k,v) -> HMap.insertWith (liftA2 (||)) (cs k) v hm) mempty slist
+    layerFilters = HMap.fromListWith (liftA2 (||)) slist
 
 -- | Convert style and zoom level to a list of (source_layer, filter)
-styleToSlist :: T.Text -> Int -> MapboxStyle -> [(T.Text, CompiledExpr Bool)]
+styleToSlist :: T.Text -> Int -> MapboxStyle -> [(BL.ByteString, CompiledExpr Bool)]
 styleToSlist source zoom =
-  map (\(_, srclayer, mfilter, _, _) -> (srclayer, fromMaybe (return True) mfilter))
+  map (\(_, srclayer, mfilter, _, _) -> (cs srclayer, fromMaybe (return True) mfilter))
   . toListOf (msLayers . traverse . _VectorLayer . filtered (\(src,_,_, minz, maxz) -> src == source && zoomMinOk minz && zoomMaxOk maxz))
   where
     zoomMinOk Nothing     = True
