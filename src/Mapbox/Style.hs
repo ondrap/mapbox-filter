@@ -1,22 +1,27 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE TemplateHaskell   #-}
 
 module Mapbox.Style where
 
+import           Control.Lens      (makeLenses, makePrisms)
 import           Data.Aeson        (FromJSON (..), (.:), (.:?))
 import qualified Data.Aeson        as AE
 import qualified Data.Text         as T
 
-import           Mapbox.Expression (TExp, typeCheckFilter)
+import           Mapbox.Expression (typeCheckFilter)
+import           Mapbox.Interpret  (CompiledExpr, compileExpr)
 
 data Layer =
   VectorLayer {
     _lSource      :: T.Text
   , _lSourceLayer :: T.Text
-  , _lFilter      :: Maybe (TExp Bool)
+  , _lFilter      :: Maybe (CompiledExpr Bool)
 } | RasterLayer {
     _lSource :: T.Text
-} deriving (Show)
+}
+makePrisms ''Layer
+
 instance FromJSON Layer where
   parseJSON = AE.withObject "Layer" $ \o -> do
     _lSource <- o .: "source"
@@ -28,12 +33,13 @@ instance FromJSON Layer where
         flt <- o .:? "filter"
         _lFilter <- case flt of
             Nothing   -> return Nothing
-            Just uexp -> either fail (return . Just) (typeCheckFilter uexp)
+            Just uexp -> either fail (return . Just) (compileExpr <$> typeCheckFilter uexp)
         return VectorLayer{..}
 
 data MapboxStyle = MapboxStyle {
-    msLayers :: [Layer]
-} deriving (Show)
+    _msLayers :: [Layer]
+}
+makeLenses ''MapboxStyle
 
 instance FromJSON MapboxStyle where
   parseJSON = AE.withObject "Style" $ \o ->

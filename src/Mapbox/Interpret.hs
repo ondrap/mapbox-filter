@@ -4,14 +4,21 @@
 {-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE TemplateHaskell    #-}
 
-module Mapbox.Interpret where
+module Mapbox.Interpret (
+    compileExpr
+  , runFilter
+  , FeatureType(..)
+  , FeatureInfo(..)
+  , CompiledExpr
+) where
 
 import           Control.Applicative        ((<|>))
 import           Control.Lens               (makeLenses, view)
 import           Control.Monad.Trans.Class  (lift)
 import           Control.Monad.Trans.Reader
-import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Lazy       as BL
 import qualified Data.HashMap.Strict        as HMap
+import           Data.Maybe                 (fromMaybe)
 import           Data.Scientific            (fromFloatDigits)
 import           Data.String.Conversions    (cs)
 import           Data.Type.Equality         ((:~:) (..), TestEquality (..))
@@ -29,7 +36,7 @@ data FeatureType = Point | LineString | Polygon
 data FeatureInfo = FeatureInfo {
     _fiId   :: Word
   , _fiType :: FeatureType
-  , _fiMeta :: HMap.HashMap BS.ByteString Val
+  , _fiMeta :: HMap.HashMap BL.ByteString Val
 }
 makeLenses ''FeatureInfo
 
@@ -86,8 +93,10 @@ compileExpr (TBoolFunc bf exprs) = do
     BAny -> return (or barr)
     BAll -> return (and barr)
 compileExpr (TCmpOp op ttyp e1 e2) = do
-    v1 <- compileExpr e1
-    v2 <- compileExpr e2
+    -- We have to handle 'nulls' correctly in comparisons
+    env <- ask
+    let v1 = runReaderT (compileExpr e1) env
+    let v2 = runReaderT (compileExpr e2) env
     return $ case ttyp of
       TTBool   -> top v1 v2
       TTStr    -> top v1 v2
@@ -95,7 +104,7 @@ compileExpr (TCmpOp op ttyp e1 e2) = do
       TTNumArr -> top v1 v2
       TTAny    -> top v1 v2
   where
-    top :: Eq a => a -> a -> Bool
+    top :: Eq a => Maybe a -> Maybe a -> Bool
     top = case op of
       CEq  -> (==)
       CNeq -> (/=)
@@ -112,3 +121,8 @@ compileExpr (TOrdOp op ttyp e1 e2) = do
       CGeq -> (>=)
       CLt  -> (<)
       CLeq -> (<=)
+
+runFilter :: CompiledExpr Bool -> FeatureType -> forall gs. Feature gs -> Bool
+runFilter cexpr ftype f =
+  let finfo = FeatureInfo (_featureId f) ftype (_metadata f)
+  in fromMaybe False (runReaderT cexpr finfo)

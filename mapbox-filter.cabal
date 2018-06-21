@@ -49,6 +49,14 @@ executable mapbox-filter
   build-depends:
       base >=4.7 && <5
     , mapbox-filter
+    , string-conversions
+    , unordered-containers
+    , aeson
+    , vectortiles
+    , text
+    , lens
+    , bytestring
+    , vector
   default-language: Haskell2010
 
 -- test-suite mapbox-filter-test
