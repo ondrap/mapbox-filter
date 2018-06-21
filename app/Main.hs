@@ -23,7 +23,7 @@ import qualified Data.Text               as T
 import qualified Data.Text.IO            as T
 import qualified Data.Vector             as V
 import           Database.SQLite.Simple  (Only (..), execute, query, query_,
-                                          withConnection, withTransaction)
+                                          withConnection)
 import           Geography.VectorTile    (Layer, VectorTile, layers,
                                           linestrings, metadata, name, points,
                                           polygons, tile, untile)
@@ -36,8 +36,12 @@ import           Mapbox.Style            (MapboxStyle, lSource, msLayers,
 
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
 filterVectorTile :: [(T.Text, CompiledExpr Bool)] -> VectorTile -> VectorTile
-filterVectorTile slist = over (layers . traverse) runLayerFilter
+filterVectorTile slist = over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
   where
+    nullLayer l = null (l ^. points)
+                  && null (l ^. linestrings)
+                  && null (l ^. polygons)
+
     runLayerFilter :: Layer -> Layer
     runLayerFilter l =
       let lfilter = fromMaybe (return False) (HMap.lookup (l ^. name) layerFilters)
@@ -149,7 +153,7 @@ convertMbtiles style tilesrc fp =
           Left err -> putStrLn $ "Error when decoding tile " <> show tileid <> ": " <> cs err
           Right vtile -> do
             let restile = filterVectorTile filtList vtile
-            execute conn "update images set tile_data=? where tile_id=?" (compress (cs $ untile restile), tileid)
+            execute conn "update images set tile_data=? where tile_id=?" (compress (cs (untile restile)), tileid)
 
 main :: IO ()
 main = do
