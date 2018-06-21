@@ -4,35 +4,40 @@
 
 module Main where
 
-import           Codec.Compression.GZip  (compress, decompress)
-import           Control.Applicative     (liftA2)
-import           Control.Lens            (filtered, over, toListOf, (&), (^.),
-                                          (^..))
-import           Control.Monad           (when)
-import qualified Data.Aeson              as AE
-import           Data.Bool               (bool)
-import qualified Data.ByteString         as BS
-import qualified Data.ByteString.Lazy    as BL
-import           Data.Foldable           (for_)
-import qualified Data.HashMap.Strict     as HMap
-import           Data.List               (foldl', nub)
-import           Data.Maybe              (fromMaybe)
-import           Data.Semigroup          ((<>))
-import           Data.String.Conversions (cs)
-import qualified Data.Text               as T
-import qualified Data.Text.IO            as T
-import qualified Data.Vector             as V
-import           Database.SQLite.Simple  (Only (..), execute, query, query_,
-                                          withConnection)
-import           Geography.VectorTile    (Layer, VectorTile, layers,
-                                          linestrings, metadata, name, points,
-                                          polygons, tile, untile)
-import           Options.Applicative     hiding (style)
+import           Codec.Compression.GZip               (compress, decompress)
+import           Control.Applicative                  (liftA2)
+import           Control.Concurrent.ParallelIO.Global (parallel_,
+                                                       stopGlobalPool)
+import           Control.Lens                         (filtered, over, toListOf,
+                                                       (&), (^.), (^..))
+import           Control.Monad                        (when)
+import qualified Data.Aeson                           as AE
+import           Data.Bool                            (bool)
+import qualified Data.ByteString                      as BS
+import qualified Data.ByteString.Lazy                 as BL
+import           Data.Foldable                        (for_)
+import qualified Data.HashMap.Strict                  as HMap
+import           Data.List                            (foldl', nub)
+import           Data.Maybe                           (fromMaybe)
+import           Data.Semigroup                       ((<>))
+import           Data.String.Conversions              (cs)
+import qualified Data.Text                            as T
+import qualified Data.Text.IO                         as T
+import qualified Data.Vector                          as V
+import           Database.SQLite.Simple               (Only (..), execute,
+                                                       execute_, query, query_,
+                                                       withConnection)
+import           Geography.VectorTile                 (Layer, VectorTile,
+                                                       layers, linestrings,
+                                                       metadata, name, points,
+                                                       polygons, tile, untile)
+import           Options.Applicative                  hiding (style)
 
-import           Mapbox.Interpret        (CompiledExpr, FeatureType (..),
-                                          runFilter)
-import           Mapbox.Style            (MapboxStyle, lSource, msLayers,
-                                          _VectorLayer)
+import           Mapbox.Interpret                     (CompiledExpr,
+                                                       FeatureType (..),
+                                                       runFilter)
+import           Mapbox.Style                         (MapboxStyle, lSource,
+                                                       msLayers, _VectorLayer)
 
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
 filterVectorTile :: [(T.Text, CompiledExpr Bool)] -> VectorTile -> VectorTile
@@ -147,13 +152,18 @@ convertMbtiles style tilesrc fp =
 
       (tiles :: [Only T.Text]) <- query conn "select tile_id from map where zoom_level=?" (Only zoom)
       putStrLn $ "Tiles: " <> show (length tiles)
-      for_ tiles $ \(Only tileid) -> do
-        [Only (tdata :: BL.ByteString)] <- query conn "select tile_data from images where tile_id=?" (Only tileid)
-        case tile (cs $ decompress tdata) of
-          Left err -> putStrLn $ "Error when decoding tile " <> show tileid <> ": " <> cs err
-          Right vtile -> do
-            let restile = filterVectorTile filtList vtile
-            execute conn "update images set tile_data=? where tile_id=?" (compress (cs (untile restile)), tileid)
+      parallel_ $ shrinkTile conn filtList <$> tiles
+      -- for_ tiles (shrinkTile conn filtList)
+    stopGlobalPool
+    execute_ conn "vacuum"
+  where
+    shrinkTile conn filtList (Only tileid) = do
+      [Only (tdata :: BL.ByteString)] <- query conn "select tile_data from images where tile_id=?" (Only tileid)
+      case tile (cs $ decompress tdata) of
+        Left err -> putStrLn $ "Error when decoding tile " <> show tileid <> ": " <> cs err
+        Right vtile -> do
+          let restile = filterVectorTile filtList vtile
+          execute conn "update images set tile_data=? where tile_id=?" (compress (cs (untile restile)), tileid)
 
 main :: IO ()
 main = do

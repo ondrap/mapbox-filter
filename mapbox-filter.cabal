@@ -60,6 +60,7 @@ executable mapbox-filter
     , sqlite-simple
     , zlib
     , optparse-applicative
+    , parallel-io
   default-language: Haskell2010
 
 -- test-suite mapbox-filter-test
