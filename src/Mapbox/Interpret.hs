@@ -93,13 +93,14 @@ compileExpr (TBoolFunc bf exprs) = do
     BAny -> return (or barr)
     BAll -> return (and barr)
 compileExpr (TCmpOp op e1 e2) = do
-    -- We have to handle 'nulls' correctly in comparisons
+    -- We have to handle 'nulls' correctly in comparisons (or not??)
     env <- ask
     let v1 = runReaderT (compileExpr e1) env
     let v2 = runReaderT (compileExpr e2) env
+    -- v1 <- compileExpr e1
+    -- v2 <- compileExpr e2
     return (top v1 v2)
   where
-    top :: Eq a => Maybe a -> Maybe a -> Bool
     top = case op of
       CEq  -> (==)
       CNeq -> (/=)

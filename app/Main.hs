@@ -40,9 +40,15 @@ import           Mapbox.Interpret                     (CompiledExpr,
 import           Mapbox.Style                         (MapboxStyle, lSource,
                                                        msLayers, _VectorLayer)
 
+
+type CFilters = HMap.HashMap BL.ByteString (CompiledExpr Bool)
+
+getLayerFilter :: BL.ByteString -> CFilters -> CompiledExpr Bool
+getLayerFilter lname layerFilters = fromMaybe (return False) (HMap.lookup lname layerFilters)
+
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
-filterVectorTile :: [(BL.ByteString, CompiledExpr Bool)] -> VectorTile -> VectorTile
-filterVectorTile slist =
+filterVectorTile :: CFilters -> VectorTile -> VectorTile
+filterVectorTile layerFilters =
     over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
   where
     nullLayer l = null (l ^. points)
@@ -51,24 +57,25 @@ filterVectorTile slist =
 
     runLayerFilter :: Layer -> Layer
     runLayerFilter l =
-      let lfilter = fromMaybe (return False) (HMap.lookup (l ^. name) layerFilters)
+      let lfilter = getLayerFilter (l ^. name) layerFilters
       in l & over points (V.filter (runFilter lfilter Point))
            & over linestrings (V.filter (runFilter lfilter LineString))
            & over polygons (V.filter (runFilter lfilter Polygon))
-    layerFilters :: HMap.HashMap BL.ByteString (CompiledExpr Bool)
-    layerFilters = HMap.fromListWith combineFilters slist
-
--- 'Or' on expressions, but if first fails, still try the second
-combineFilters :: CompiledExpr Bool -> CompiledExpr Bool -> CompiledExpr Bool
-combineFilters fa fb = (fa >>= bool (lift Nothing) (return True)) <|> fb
 
 
 -- | Convert style and zoom level to a list of (source_layer, filter)
-styleToSlist :: T.Text -> Int -> MapboxStyle -> [(BL.ByteString, CompiledExpr Bool)]
-styleToSlist source zoom =
-  map (\(_, srclayer, mfilter, _, _) -> (cs srclayer, fromMaybe (return True) mfilter))
-  . toListOf (msLayers . traverse . _VectorLayer . filtered (\(src,_,_, minz, maxz) -> src == source && zoomMinOk minz && zoomMaxOk maxz))
+styleToCFilters :: T.Text -> Int -> MapboxStyle -> CFilters
+styleToCFilters source zoom =
+    HMap.fromListWith combineFilters
+  . map (\(_, srclayer, mfilter, _, _) -> (cs srclayer, fromMaybe (return True) mfilter))
+  . toListOf (msLayers . traverse . _VectorLayer . filtered acceptFilter)
   where
+    -- 'Or' on expressions, but if first fails, still try the second
+    combineFilters :: CompiledExpr Bool -> CompiledExpr Bool -> CompiledExpr Bool
+    combineFilters fa fb = (fa >>= bool (lift Nothing) (return True)) <|> fb
+
+    acceptFilter (src,_,_,minz,maxz) = src == source && zoomMinOk minz && zoomMaxOk maxz
+
     zoomMinOk Nothing     = True
     zoomMinOk (Just minz) = zoom >= minz
     zoomMaxOk Nothing     = True
@@ -135,15 +142,12 @@ dumpPbf style tilesrc zoom fp = do
       for_ (vtile ^.. layers . traverse) $ \l -> do
           T.putStrLn "-----------------------------"
           T.putStrLn ("Layer: " <> cs (l ^. name))
-          let lfilter = fromMaybe (return False) (HMap.lookup (l ^. name) layerFilters)
+          let lfilter = getLayerFilter (l ^. name) cfilters
           for_ (l ^. points) (printCont lfilter Point)
           for_ (l ^. linestrings) (printCont lfilter LineString)
           for_ (l ^. polygons) (printCont lfilter Polygon)
   where
-    slist = styleToSlist tilesrc zoom style
-
-    layerFilters :: HMap.HashMap BL.ByteString (CompiledExpr Bool)
-    layerFilters = foldl' (\hm (k,v) -> HMap.insertWith combineFilters (cs k) v hm) mempty slist
+    cfilters = styleToCFilters tilesrc zoom style
 
     printCont lfilter ptype feature = do
       let include = runFilter lfilter ptype feature
@@ -155,7 +159,7 @@ convertMbtiles style tilesrc fp =
     zlevels <- query_ conn "select distinct zoom_level from map order by zoom_level"
     for_ zlevels $ \(Only zoom) -> do
       putStrLn $ "Shrinking zoom: " <> show zoom
-      let filtList = styleToSlist tilesrc zoom style
+      let filtList = styleToCFilters tilesrc zoom style
 
       (tiles :: [Only T.Text]) <- query conn "select tile_id from map where zoom_level=?" (Only zoom)
       putStrLn $ "Tiles: " <> show (length tiles)
