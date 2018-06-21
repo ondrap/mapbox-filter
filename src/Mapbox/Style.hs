@@ -7,7 +7,7 @@ import           Data.Aeson        (FromJSON (..), (.:), (.:?))
 import qualified Data.Aeson        as AE
 import qualified Data.Text         as T
 
-import           Mapbox.Expression
+import           Mapbox.Expression (TExp, typeCheckFilter)
 
 data Layer =
   VectorLayer {

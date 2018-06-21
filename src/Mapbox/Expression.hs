@@ -4,9 +4,19 @@
 {-# LANGUAGE OverloadedStrings         #-}
 
 module Mapbox.Expression (
-    TExp
+    TExp(..)
+  , TTyp(..)
+  , TOrderable(..)
   , UExp
   , typeCheckFilter
+  , AnyValue(..)
+  , AttrType(..)
+  , BoolFunc(..)
+  , CmpOp(..)
+  , OrdOp(..)
+  , ATExp(..)
+  , tValToTTyp
+  , anyValToTVal
 ) where
 
 import           Control.Applicative ((<|>))
@@ -59,9 +69,6 @@ instance FromJSON UExp where
       varexpr [AE.String nm] = return (UVar nm)
       varexpr _              = fail "Invalid var expression"
 
-data UTyp = UTStr | UTNum | UTBool | UTNumArr
-  deriving (Show)
-
 data CmpOp = CEq | CNeq
   deriving (Show)
 
@@ -71,16 +78,19 @@ data OrdOp = CGt | CGeq | CLt | CLeq
 data BoolFunc = BAll | BAny
   deriving (Show)
 
-data AttrType = GeometryType | FeatureId
-  deriving (Show)
+data AttrType a where
+    GeometryType :: AttrType T.Text
+    FeatureId :: AttrType AnyValue
+instance Show (AttrType a) where
+  showsPrec _ GeometryType = showString "geometry-type"
+  showsPrec _ FeatureId    = showString "id"
 
 data AnyValue =
     ABool Bool
   | ANum Scientific
   | AStr T.Text
   | ANumArray NumArray
-  | ANull
-  deriving (Show)
+  deriving (Show, Eq)
 
 data TTyp a where
   TTBool :: TTyp Bool
@@ -94,6 +104,7 @@ instance TestEquality TTyp where
   testEquality TTNum TTNum       = Just Refl
   testEquality TTStr TTStr       = Just Refl
   testEquality TTNumArr TTNumArr = Just Refl
+  testEquality TTAny TTAny       = Just Refl
   testEquality _ _               = Nothing
 
 instance Show (TTyp a) where
@@ -108,6 +119,19 @@ data TValue a where
   TVNum :: TValue Scientific
   TVStr :: TValue T.Text
   TVNumArr :: TValue NumArray
+
+tValToTTyp :: TValue a -> TTyp a
+tValToTTyp TVBool   = TTBool
+tValToTTyp TVNum    = TTNum
+tValToTTyp TVStr    = TTStr
+tValToTTyp TVNumArr = TTNumArr
+
+anyValToTVal :: AnyValue -> TValue a -> Maybe a
+anyValToTVal (ABool b) TVBool        = Just b
+anyValToTVal (ANum n) TVNum          = Just n
+anyValToTVal (AStr s) TVStr          = Just s
+anyValToTVal (ANumArray na) TVNumArr = Just na
+anyValToTVal _ _                     = Nothing
 
 instance Show (TValue a) where
   showsPrec _ TVBool   = showString "Bool"
@@ -139,7 +163,7 @@ data TExp a where
   TCheckMeta :: TExp T.Text -> TExp Bool
   TNegate :: TExp Bool -> TExp Bool
   TConvert :: Bool -> TValue a -> [ATExp] -> TExp a
-  TReadAttr :: AttrType -> TExp T.Text
+  TReadAttr :: AttrType a -> TExp a
 
 instance Show (TExp a) where
   showsPrec p (TNum d) = showsPrec p d
