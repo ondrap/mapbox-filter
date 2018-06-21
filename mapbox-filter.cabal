@@ -1,0 +1,60 @@
+name:           mapbox-filter
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/githubuser/osm-shrink#readme>
+homepage:       https://github.com/githubuser/osm-shrink#readme
+bug-reports:    https://github.com/githubuser/osm-shrink/issues
+author:         Ondrej Palkovsky
+maintainer:     palkovsky.ondrej@gmail.com
+copyright:      2018 Ondrej Palkovsky
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+cabal-version:  >= 1.10
+
+extra-source-files:
+    ChangeLog.md
+    README.md
+
+-- source-repository head
+--   type: git
+--   location: https://github.com/githubuser/osm-shrink
+
+library
+  hs-source-dirs:
+      src
+  build-depends:
+      base >=4.7 && <5
+    , vectortiles
+    , bytestring
+    , unordered-containers
+    , aeson
+    , scientific
+    , text
+    , vector
+  exposed-modules:
+      Mapbox.Expression
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+executable mapbox-filter
+  main-is: Main.hs
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , mapbox-filter
+  default-language: Haskell2010
+
+-- test-suite mapbox-filter-test
+--   type: exitcode-stdio-1.0
+--   main-is: Spec.hs
+--   hs-source-dirs:
+--       test
+--   ghc-options: -threaded -rtsopts -with-rtsopts=-N
+--   build-depends:
+--       base >=4.7 && <5
+--     , osm-shrink
+--   other-modules:
+--       Paths_osm_shrink
+--   default-language: Haskell2010
