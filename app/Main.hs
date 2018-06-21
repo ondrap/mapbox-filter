@@ -1,7 +1,8 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import           Control.Applicative     (liftA2)
-import           Control.Lens            (over, (&), (^.))
+import           Control.Lens            (filtered, over, toListOf, (&), (^.))
 import qualified Data.Aeson              as AE
 import qualified Data.ByteString         as BS
 import qualified Data.ByteString.Lazy    as BL
@@ -12,11 +13,12 @@ import           Data.String.Conversions (cs)
 import qualified Data.Text               as T
 import qualified Data.Vector             as V
 import           Geography.VectorTile    (Layer, VectorTile, layers,
-                                          linestrings, name, points, polygons)
+                                          linestrings, name, points, polygons,
+                                          tile, untile)
 
 import           Mapbox.Interpret        (CompiledExpr, FeatureType (..),
                                           runFilter)
-import           Mapbox.Style            (MapboxStyle)
+import           Mapbox.Style            (MapboxStyle, msLayers, _VectorLayer)
 
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
 filterVectorTile :: [(T.Text, CompiledExpr Bool)] -> VectorTile -> VectorTile
@@ -31,5 +33,28 @@ filterVectorTile slist = over (layers . traverse) runLayerFilter
     layerFilters :: HMap.HashMap BL.ByteString (CompiledExpr Bool)
     layerFilters = foldl' (\hm (k,v) -> HMap.insertWith (liftA2 (&&)) (cs k) v hm) mempty slist
 
+-- | Convert style to a list of (source_layer, filter)
+styleToSlist :: T.Text -> MapboxStyle -> [(T.Text, CompiledExpr Bool)]
+styleToSlist source =
+  map (\(_, srclayer, mfilter) -> (srclayer, fromMaybe (return True) mfilter))
+  . toListOf (msLayers . traverse . _VectorLayer . filtered (\(src,_,_) -> src == source))
+
 main :: IO ()
-main = return ()
+main = do
+  bstyle <- BS.readFile "openmaptiles.json.js"
+  let Just style = AE.decodeStrict bstyle
+
+  mvt <- BS.readFile "2681.pbf"
+  case tile mvt of
+    Left err -> error (show err)
+    Right vtile -> do
+      -- Print statistics
+      print (length (vtile ^. layers . traverse . points))
+      print (length (vtile ^. layers . traverse . linestrings))
+      print (length (vtile ^. layers . traverse . polygons))
+      let slist = styleToSlist "openmaptiles" style
+          res = filterVectorTile slist vtile
+      print (length (res ^. layers . traverse . points))
+      print (length (res ^. layers . traverse . linestrings))
+      print (length (res ^. layers . traverse . polygons))
+      BS.writeFile "2681-new.pbf" (untile res)
