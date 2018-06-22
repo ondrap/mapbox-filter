@@ -67,6 +67,8 @@ executable mapbox-filter
     , unix
     , scotty
     , safe-exceptions
+    , amazonka
+    , amazonka-s3
   default-language: Haskell2010
 
 -- test-suite mapbox-filter-test
