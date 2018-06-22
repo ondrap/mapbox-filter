@@ -126,9 +126,8 @@ genMetadata conn minfo proto host = do
     metalines :: [(T.Text,String)] <- query_ conn "select name,value from metadata"
     return $ AE.object $
         concatMap addMetaLine metalines
-        ++ [ "tiles" .= [proto <> "://" <> host <> "/tiles/" <> minfo <> "/{z}/{x}/{y}"]
-           , "tilejson" .= ("2.0.0" :: T.Text)
-           , "scheme" .= ("tms" :: T.Text)
+        ++ ["tiles" .= [proto <> "://" <> host <> "/tiles/" <> minfo <> "/{z}/{x}/{y}"],
+            "tilejson" .= ("2.0.0" :: T.Text)
             ]
   where
     addMetaLine (key,val)
@@ -194,8 +193,6 @@ convertMbtiles style fp =
         Right newdta ->
           execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
 
-
-
 runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> Bool -> IO ()
 runWebServer port mstyle mbpath lazyUpdate =
   withConnection mbpath $ \conn -> do
@@ -220,10 +217,11 @@ runWebServer port mstyle mbpath lazyUpdate =
           z :: Int <- param "z"
           x :: Int <- param "x"
           y :: Int <- param "y"
+          let tms_y = 2 ^ z - y - 1
 
           mnewtile <- case (mstyle, lazyUpdate) of
-              (Just (style,_), True) -> getLazyTile conn style z x y
-              _                      -> getTile conn z x y
+              (Just (style,_), True) -> getLazyTile conn style z x tms_y
+              _                      -> getTile conn z x tms_y
 
           addHeader "Access-Control-Allow-Origin" "*"
           setHeader "Content-Type" "application/x-protobuf"
@@ -242,9 +240,9 @@ runWebServer port mstyle mbpath lazyUpdate =
         _          -> return ""
 
     -- Get tile from modified database; if not already shrinked, shrink it and write to the database
-    getLazyTile conn style z x y = do
+    getLazyTile conn style z x tms_y = do
       rows <- liftIO $ query conn "select tile_data, map.tile_id, shrinked from images,map where zoom_level=? AND tile_column=? AND tile_row=? AND map.tile_id=images.tile_id"
-                (z, x, y)
+                (z, x, tms_y)
       case rows of
         [(dta, _, 1 :: Int)] -> return (Just dta)
         [(dta, tileid :: T.Text, _)] ->
@@ -257,9 +255,9 @@ runWebServer port mstyle mbpath lazyUpdate =
         _ -> return Nothing
 
     -- Ordinarily get tile from database; if styling enabled, do the styling
-    getTile conn z x y = do
+    getTile conn z x tms_y = do
       rows <- liftIO $ query conn "select tile_data from tiles where zoom_level=? AND tile_column=? AND tile_row=?"
-                      (z, x, y)
+                      (z, x, tms_y)
       case rows of
         [Only dta] ->
           case mstyle of
