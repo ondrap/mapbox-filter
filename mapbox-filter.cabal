@@ -34,10 +34,12 @@ library
     , transformers
     , lens
     , string-conversions
+    , zlib
   exposed-modules:
       Mapbox.Expression
       Mapbox.Style
       Mapbox.Interpret
+      Mapbox.Filters
   default-language: Haskell2010
   ghc-options: -Wall -Wcompat
 

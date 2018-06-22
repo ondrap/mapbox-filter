@@ -4,14 +4,10 @@
 
 module Main where
 
-import           Codec.Compression.GZip               (compress, decompress)
-import           Control.Monad.Trans.Class            (lift)
-
 import           Control.Concurrent.ParallelIO.Global (parallel_,
                                                        stopGlobalPool)
 import           Control.Exception.Safe               (catchAny)
-import           Control.Lens                         (filtered, over, toListOf,
-                                                       (%~), (&), (^.), (^..),
+import           Control.Lens                         ((%~), (&), (^.), (^..),
                                                        _1)
 import           Control.Monad                        (when)
 import           Control.Monad.IO.Class               (liftIO)
@@ -28,14 +24,13 @@ import           Data.Semigroup                       ((<>))
 import           Data.String.Conversions              (cs)
 import qualified Data.Text                            as T
 import qualified Data.Text.IO                         as T
-import qualified Data.Vector                          as V
-import           Database.SQLite.Simple               (Only (..), execute,
-                                                       execute_, query, query_,
-                                                       withConnection)
-import           Geography.VectorTile                 (Layer, VectorTile,
-                                                       layers, linestrings,
+import qualified Data.Text.Lazy                       as TL
+import           Database.SQLite.Simple               (Connection, Only (..),
+                                                       execute, execute_, query,
+                                                       query_, withConnection)
+import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
-                                                       polygons, tile, untile)
+                                                       polygons, tile)
 import           Options.Applicative                  hiding (header, style)
 import           System.Posix.Files                   (getFileStatus,
                                                        modificationTime)
@@ -45,52 +40,12 @@ import           Web.Scotty                           (addHeader, get, header,
                                                        json, param, raise, raw,
                                                        scotty, setHeader)
 
-import           Mapbox.Interpret                     (CompiledExpr,
-                                                       FeatureType (..),
+import           Mapbox.Filters
+import           Mapbox.Interpret                     (FeatureType (..),
                                                        runFilter)
 import           Mapbox.Style                         (MapboxStyle, lSource,
                                                        msLayers, _VectorLayer)
 
-
-type CFilters = HMap.HashMap BL.ByteString (CompiledExpr Bool)
-
-getLayerFilter :: BL.ByteString -> CFilters -> CompiledExpr Bool
-getLayerFilter lname layerFilters = fromMaybe (return False) (HMap.lookup lname layerFilters)
-
--- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
-filterVectorTile :: CFilters -> VectorTile -> VectorTile
-filterVectorTile layerFilters =
-    over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
-  where
-    nullLayer l = null (l ^. points)
-                  && null (l ^. linestrings)
-                  && null (l ^. polygons)
-
-    runLayerFilter :: Layer -> Layer
-    runLayerFilter l =
-      let lfilter = getLayerFilter (l ^. name) layerFilters
-      in l & over points (V.filter (runFilter lfilter Point))
-           & over linestrings (V.filter (runFilter lfilter LineString))
-           & over polygons (V.filter (runFilter lfilter Polygon))
-
-
--- | Convert style and zoom level to a list of (source_layer, filter)
-styleToCFilters :: Int -> MapboxStyle -> CFilters
-styleToCFilters zoom =
-    HMap.fromListWith combineFilters
-  . map (\(_, srclayer, mfilter, _, _) -> (cs srclayer, fromMaybe (return True) mfilter))
-  . toListOf (msLayers . traverse . _VectorLayer . filtered acceptFilter)
-  where
-    -- 'Or' on expressions, but if first fails, still try the second
-    combineFilters :: CompiledExpr Bool -> CompiledExpr Bool -> CompiledExpr Bool
-    combineFilters fa fb = (fa >>= bool (lift Nothing) (return True)) <|> fb
-
-    acceptFilter (_,_,_,minz,maxz) = zoomMinOk minz && zoomMaxOk maxz
-
-    zoomMinOk Nothing     = True
-    zoomMinOk (Just minz) = zoom >= minz
-    zoomMaxOk Nothing     = True
-    zoomMaxOk (Just maxz) = zoom <= maxz
 
 data CmdLine =
     CmdDump {
@@ -150,6 +105,7 @@ getStyle fname = do
       putStrLn err
       error "Parsing mapbox style failed"
 
+
 -- | Check that the user correctly specified the source name and filter it out
 checkStyle :: Maybe T.Text -> MapboxStyle -> IO MapboxStyle
 checkStyle mtilesrc styl = do
@@ -163,6 +119,37 @@ checkStyle mtilesrc styl = do
     lst | Just nm <- mtilesrc, nm `elem` lst -> return nm
         | otherwise -> error ("Invalid tile source specified, " <> show mtilesrc)
   return $ styl & msLayers %~ filter (\l -> l ^. lSource == tilesrc)
+
+-- | Generate metadata json based on modification text + database + other info
+genMetadata :: Connection -> TL.Text -> TL.Text -> TL.Text -> IO AE.Value
+genMetadata conn minfo proto host = do
+    metalines :: [(T.Text,String)] <- query_ conn "select name,value from metadata"
+    return $ AE.object $
+        concatMap addMetaLine metalines
+        ++ ["tiles" .= [proto <> "://" <> host <> "/tiles/" <> minfo <> "/{z}/{x}/{y}"],
+            "tilejson" .= ("2.0.0" :: T.Text)
+            ]
+  where
+    addMetaLine (key,val)
+      | key `elem` ["attribution", "description", "name", "format", "basename", "id"] =
+            [key .= val]
+      | key `elem` ["minzoom", "maxzoom", "pixel_scale", "maskLevel", "planettime"],
+        Just (dnum :: Int) <- readMaybe val =
+            [key .= dnum]
+      | key == "json", Just (AE.Object obj) <- AE.decode (cs val) =
+            HMap.toList obj
+      | key == "center", Just (lst :: [Double]) <- decodeArr val =
+          [key .= lst]
+      | key == "bounds", Just lst@[_ :: Double, _,_,_] <- decodeArr val =
+          [key .= lst]
+      | otherwise = []
+      where
+        split _ [] = []
+        split c lst =
+            let (start,rest) = span (/= c) lst
+            in start : split c (drop 1 rest)
+        decodeArr = traverse readMaybe . split ','
+
 
 dumpPbf :: MapboxStyle -> Int -> FilePath -> IO ()
 dumpPbf style zoom fp = do
@@ -201,11 +188,10 @@ convertMbtiles style fp =
   where
     shrinkTile conn filtList (Only tileid) = do
       [Only (tdata :: BL.ByteString)] <- query conn "select tile_data from images where tile_id=?" (Only tileid)
-      case tile (cs $ decompress tdata) of
+      case filterTileCs filtList tdata of
         Left err -> putStrLn $ "Error when decoding tile " <> show tileid <> ": " <> cs err
-        Right vtile -> do
-          let restile = filterVectorTile filtList vtile
-          execute conn "update images set tile_data=? where tile_id=?" (compress (cs (untile restile)), tileid)
+        Right newdta ->
+          execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
 
 runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> Bool -> IO ()
 runWebServer port mstyle mbpath lazyUpdate =
@@ -224,7 +210,7 @@ runWebServer port mstyle mbpath lazyUpdate =
           dbmtime <- liftIO $ getDbMtime conn
           let stmtime = maybe 0 snd mstyle
           let mtime = dbmtime <> "_" <> show stmtime
-          metaJson <- liftIO $ genJson conn (cs mtime) proto host
+          metaJson <- liftIO $ genMetadata conn (cs mtime) proto host
           addHeader "Access-Control-Allow-Origin" "*"
           json metaJson
       get "/tiles/:mt1/:z/:x/:y" $ do
@@ -253,50 +239,19 @@ runWebServer port mstyle mbpath lazyUpdate =
         [Only res] -> return res
         _          -> return ""
 
-    genJson conn minfo proto host = do
-      metalines :: [(T.Text,String)] <- query_ conn "select name,value from metadata"
-      return $ AE.object $
-          concatMap addMetaLine metalines
-          ++ ["tiles" .= [proto <> "://" <> host <> "/tiles/" <> minfo <> "/{z}/{x}/{y}"],
-              "tilejson" .= ("2.0.0" :: T.Text)
-              ]
-
-    addMetaLine (key,val)
-      | key `elem` ["attribution", "description", "name", "format", "basename", "id"] =
-            [key .= val]
-      | key `elem` ["minzoom", "maxzoom", "pixel_scale", "maskLevel", "planettime"],
-        Just (dnum :: Int) <- readMaybe val =
-            [key .= dnum]
-      | key == "json", Just (AE.Object obj) <- AE.decode (cs val) =
-            HMap.toList obj
-      | key == "center", Just (lst :: [Double]) <- decodeArr val =
-          [key .= lst]
-      | key == "bounds", Just lst@[_ :: Double, _,_,_] <- decodeArr val =
-          [key .= lst]
-      | otherwise = []
-      where
-        split _ [] = []
-        split c lst =
-            let (start,rest) = span (/= c) lst
-            in start : split c (drop 1 rest)
-        decodeArr = traverse readMaybe . split ','
-
     -- Get tile from modified database; if not already shrinked, shrink it and write to the database
     getLazyTile conn style z x tms_y = do
       rows <- liftIO $ query conn "select tile_data, map.tile_id, shrinked from images,map where zoom_level=? AND tile_column=? AND tile_row=? AND map.tile_id=images.tile_id"
                 (z, x, tms_y)
       case rows of
         [(dta, _, 1 :: Int)] -> return (Just dta)
-        [(dta, tileid :: T.Text, _)] -> do
-            -- Shrink
-            let cstyles = styleToCFilters z style
-            case tile (cs (decompress dta)) of
+        [(dta, tileid :: T.Text, _)] ->
+            case filterTile z style dta of
               Left err -> raise (cs err)
-              Right dtile -> do
-                let newdta = compress . cs . untile . filterVectorTile cstyles $ dtile
+              Right newdta -> do
                 liftIO $ execute conn "update images set tile_data=?,shrinked=1 where tile_id=?"
                               (newdta, tileid)
-                return $ Just newdta
+                return (Just newdta)
         _ -> return Nothing
 
     -- Ordinarily get tile from database; if styling enabled, do the styling
@@ -307,12 +262,10 @@ runWebServer port mstyle mbpath lazyUpdate =
         [Only dta] ->
           case mstyle of
             Nothing -> return (Just dta)
-            Just (style,_) -> do
-              -- Shrink
-              let cstyles = styleToCFilters z style
-              case tile (cs (decompress dta)) of
-                Left err -> raise (cs err)
-                Right dtile -> return $ Just (compress . cs . untile . filterVectorTile cstyles $ dtile)
+            Just (style,_) ->
+              case filterTile z style dta of
+                Left err     -> raise (cs err)
+                Right newdta -> return (Just newdta)
         _ -> return Nothing
 
 main :: IO ()
@@ -335,3 +288,4 @@ main = do
               fstat <- getFileStatus fp
               return (Just (st, modificationTime fstat))
         runWebServer fWebPort mstyle fMbtiles fLazyUpdate
+
