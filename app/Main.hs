@@ -225,6 +225,7 @@ runWebServer port mstyle mbpath lazyUpdate =
           let stmtime = maybe 0 snd mstyle
           let mtime = dbmtime <> "_" <> show stmtime
           metaJson <- liftIO $ genJson conn (cs mtime) proto host
+          addHeader "Access-Control-Allow-Origin" "*"
           json metaJson
       get "/tiles/:mt1/:z/:x/:y" $ do
           z :: Int <- param "z"
