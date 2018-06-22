@@ -238,7 +238,7 @@ runWebServer port mstyle mbpath lazyUpdate =
 
           addHeader "Access-Control-Allow-Origin" "*"
           setHeader "Content-Type" "application/x-protobuf"
-          -- TODO: cache-control
+          setHeader "Cache-control" "max-age=31536000"
 
           case mnewtile of
             Just dta -> do
@@ -257,18 +257,17 @@ runWebServer port mstyle mbpath lazyUpdate =
       return $ AE.object $
           concatMap addMetaLine metalines
           ++ ["tiles" .= [proto <> "://" <> host <> "/tiles/" <> minfo <> "/{z}/{x}/{y}"],
-              "metaversion" .= ("2.0.0" :: T.Text) -- Fakt??
+              "tilejson" .= ("2.0.0" :: T.Text)
               ]
 
     addMetaLine (key,val)
-      | key `elem` ["attribution", "description", "name", "format", "basename"] =
+      | key `elem` ["attribution", "description", "name", "format", "basename", "id"] =
             [key .= val]
-      | key `elem` ["minzoom", "maxzoom", "pixel_scale"],
+      | key `elem` ["minzoom", "maxzoom", "pixel_scale", "maskLevel", "planettime"],
         Just (dnum :: Int) <- readMaybe val =
             [key .= dnum]
       | key == "json", Just (AE.Object obj) <- AE.decode (cs val) =
             HMap.toList obj
-      -- TODO: mtime, planettime??
       | key == "center", Just (lst :: [Double]) <- decodeArr val =
           [key .= lst]
       | key == "bounds", Just lst@[_ :: Double, _,_,_] <- decodeArr val =
