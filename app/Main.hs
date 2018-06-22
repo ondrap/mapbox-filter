@@ -42,8 +42,8 @@ import           System.Posix.Files                   (getFileStatus,
 import           System.Posix.Types                   (EpochTime)
 import           Text.Read                            (readMaybe)
 import           Web.Scotty                           (addHeader, get, header,
-                                                       json, next, param, raise,
-                                                       raw, scotty, setHeader)
+                                                       json, param, raise, raw,
+                                                       scotty, setHeader)
 
 import           Mapbox.Interpret                     (CompiledExpr,
                                                        FeatureType (..),
@@ -127,14 +127,14 @@ webOptions :: Parser CmdLine
 webOptions = CmdWebServer <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
                           <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
                           <*> option auto (short 'p' <> long "port" <> help "Web port number")
-                          <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with shrinked data")
+                          <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with filtered data")
                           <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 cmdLineParser  :: Parser CmdLine
 cmdLineParser =
   subparser $
     command "dump" (info (helper <*> dumpOptions) (progDesc "Dump vector files contents."))
-    <> command "shrink" (info (helper <*> mbtileOptions) (progDesc "Run filtering on a MBTiles database"))
+    <> command "filter" (info (helper <*> mbtileOptions) (progDesc "Run filtering on a MBTiles database"))
     <> command "web" (info (helper <*> webOptions) (progDesc "Run a web server for serving tiles"))
 
 progOpts :: ParserInfo CmdLine
@@ -189,13 +189,13 @@ convertMbtiles style fp =
   withConnection fp $ \conn -> do
     zlevels <- query_ conn "select distinct zoom_level from map order by zoom_level"
     for_ zlevels $ \(Only zoom) -> do
-      putStrLn $ "Shrinking zoom: " <> show zoom
+      putStrLn $ "Filtering zoom: " <> show zoom
       let filtList = styleToCFilters zoom style
 
       (tiles :: [Only T.Text]) <- query conn "select tile_id from map where zoom_level=?" (Only zoom)
       putStrLn $ "Tiles: " <> show (length tiles)
       parallel_ $ shrinkTile conn filtList <$> tiles
-      -- for_ tiles (shrinkTile conn filtList)
+      -- sequence_ $ (shrinkTile conn filtList) <$> tiles
     stopGlobalPool
     execute_ conn "vacuum"
   where

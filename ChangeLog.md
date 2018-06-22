@@ -1,3 +1,3 @@
-# Changelog for osm-shrink
+# Changelog for mapbox-filter
 
 ## Unreleased changes
