@@ -3,12 +3,13 @@
 A library that can interpret a subset of the Mapbox style epxression, a very simplified
 parser for the Mapbox style JSON and an executable that can:
 
-- dump the uncompressed tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level
-- iterate throught the `mbtile` file and filter the tile contents according to the MapBox style, thus making the `mbtile` file smaller
-- run a webserver for
+- Dump the uncompressed tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level (the .pbf files are often gzipped, you might need to unzip them first).
+- Iterate throught the `mbtile` file and filter the tile contents according to the MapBox style, thus making the `mbtile` file smaller.
+- Run a webserver for
   * serving the tiles from the `mbtile` file
   * serving the real-time filtered tiles
   * after serving a tile saving the compressed tile back to the database (Openmaptiles database only is currently supported in this mode)
+- Publish mbtile to S3 so that you don't need to run a webserver at all.
 
 This library supports only a subset of the expression language (https://www.mapbox.com/mapbox-gl-js/style-spec/#expressions-types).
 This is because I don't need that and most of the language isn't going to be used in the filter expression anyway. If you need
@@ -33,15 +34,22 @@ Serve the mbtile file. The endpoint for MapBox is: http://server_name:3000/tiles
 $ mapbox-filter web -p 3000 cz.mbtiles
 ```
 
-Serve the mbitle file while doing online filtering according to the openmaptiles.json.js file
+Serve the mbtile file while doing online filtering according to the openmaptiles.json.js file
 ```
 $ mapbox-filter web -p 3000 -j openmaptiles.json.js cz.mbtiles
 ```
 
-Serve the mbitle file, do online filtering on not-yet-filtered tiles, save the filtered tiles back
+Serve the mbtile file, do online filtering on not-yet-filtered tiles, save the filtered tiles back
 to the database.
 ```
 $ mapbox-filter web -p 3000 -j openmaptiles.json.js -l cz.mbtiles
+```
+
+Publish filtered mbtile to S3. Higher parallelism might be desirable, try adding
+e.g. `+RTS -N10` to achieve e.g. parallelism of 10 (this will run more OS threads instead
+of more 'sparks', but that probably won't be a problem).
+```
+$ mapbox-filter publish -j openmaptiles.json.js -u https://s3.eu-central-1.amazonaws.com/my-test-bucket/styled-map -t s3://my-test-bucket/styled-map cz.mbtiles
 ```
 
 ## What next
