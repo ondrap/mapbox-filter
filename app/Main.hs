@@ -11,7 +11,8 @@ import           Control.Concurrent.ParallelIO.Global (parallel_,
                                                        stopGlobalPool)
 import           Control.Exception.Safe               (catchAny)
 import           Control.Lens                         (filtered, over, toListOf,
-                                                       (&), (^.), (^..))
+                                                       (%~), (&), (^.), (^..),
+                                                       _1)
 import           Control.Monad                        (when)
 import           Control.Monad.IO.Class               (liftIO)
 import qualified Data.Aeson                           as AE
@@ -72,8 +73,8 @@ filterVectorTile layerFilters =
 
 
 -- | Convert style and zoom level to a list of (source_layer, filter)
-styleToCFilters :: T.Text -> Int -> MapboxStyle -> CFilters
-styleToCFilters source zoom =
+styleToCFilters :: Int -> MapboxStyle -> CFilters
+styleToCFilters zoom =
     HMap.fromListWith combineFilters
   . map (\(_, srclayer, mfilter, _, _) -> (cs srclayer, fromMaybe (return True) mfilter))
   . toListOf (msLayers . traverse . _VectorLayer . filtered acceptFilter)
@@ -82,7 +83,7 @@ styleToCFilters source zoom =
     combineFilters :: CompiledExpr Bool -> CompiledExpr Bool -> CompiledExpr Bool
     combineFilters fa fb = (fa >>= bool (lift Nothing) (return True)) <|> fb
 
-    acceptFilter (src,_,_,minz,maxz) = src == source && zoomMinOk minz && zoomMaxOk maxz
+    acceptFilter (src,_,_,minz,maxz) = zoomMinOk minz && zoomMaxOk maxz
 
     zoomMinOk Nothing     = True
     zoomMinOk (Just minz) = zoom >= minz
@@ -92,18 +93,18 @@ styleToCFilters source zoom =
 data CmdLine =
     CmdDump {
       fStyle      :: FilePath
-    , fSourceName :: T.Text
+    , fSourceName :: Maybe T.Text
     , fZoomLevel  :: Int
     , fMvtSource  :: FilePath
   }
   | CmdMbtiles {
       fStyle      :: FilePath
-    , fSourceName :: T.Text
+    , fSourceName :: Maybe T.Text
     , fMbtiles    :: FilePath
   }
   | CmdWebServer {
       fModStyle   :: Maybe FilePath
-    , fSourceName :: T.Text
+    , fSourceName :: Maybe T.Text
     , fWebPort    :: Int
     , fLazyUpdate :: Bool
     , fMbtiles    :: FilePath
@@ -111,18 +112,18 @@ data CmdLine =
 
 dumpOptions :: Parser CmdLine
 dumpOptions = CmdDump <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
-                      <*> (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+                      <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
                       <*> option auto (short 'z' <> long "zoom" <> help "Tile zoom level")
                       <*> argument str (metavar "SRCFILE" <> help "Source file")
 
 mbtileOptions :: Parser CmdLine
 mbtileOptions = CmdMbtiles <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
-                           <*> (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+                           <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
                            <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 webOptions :: Parser CmdLine
 webOptions = CmdWebServer <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
-                          <*> (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+                          <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
                           <*> option auto (short 'p' <> long "port" <> help "Web port number")
                           <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with shrinked data")
                           <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
@@ -147,17 +148,22 @@ getStyle fname = do
       putStrLn err
       error "Parsing mapbox style failed"
 
-checkStyle :: MapboxStyle -> T.Text -> IO ()
-checkStyle styl tilesrc = do
+-- | Check that the user correctly specified the source name and filter it out
+checkStyle :: Maybe T.Text -> MapboxStyle -> IO MapboxStyle
+checkStyle mtilesrc styl = do
   -- Print vector styles
-  let sources = nub (styl ^.. msLayers . traverse . lSource)
+  let sources = nub (styl ^.. msLayers . traverse . _VectorLayer . _1)
   for_ sources $ \s ->
-    T.putStrLn $ "Found source layer: " <> s
-  when (tilesrc `notElem` sources) $
-    error ("Invalid tile source specified, " <> show tilesrc <> " not found")
+    T.putStrLn $ "Found vector source layer: " <> s
+  tilesrc <- case sources of
+    [nm] | Just nm == mtilesrc -> return nm
+         | Nothing <- mtilesrc -> return nm
+    lst | Just nm <- mtilesrc, nm `elem` lst -> return nm
+        | otherwise -> error ("Invalid tile source specified, " <> show mtilesrc)
+  return $ styl & msLayers %~ filter (\l -> l ^. lSource == tilesrc)
 
-dumpPbf :: MapboxStyle -> T.Text -> Int -> FilePath -> IO ()
-dumpPbf style tilesrc zoom fp = do
+dumpPbf :: MapboxStyle -> Int -> FilePath -> IO ()
+dumpPbf style zoom fp = do
   mvt <- BS.readFile fp
   case tile mvt of
     Left err -> error (show err)
@@ -170,19 +176,19 @@ dumpPbf style tilesrc zoom fp = do
           for_ (l ^. linestrings) (printCont lfilter LineString)
           for_ (l ^. polygons) (printCont lfilter Polygon)
   where
-    cfilters = styleToCFilters tilesrc zoom style
+    cfilters = styleToCFilters zoom style
 
     printCont lfilter ptype feature = do
       let include = runFilter lfilter ptype feature
       putStrLn $ bool "- " "  " include <> show ptype <> " " <> show (feature ^. metadata)
 
-convertMbtiles :: MapboxStyle -> T.Text -> FilePath -> IO ()
-convertMbtiles style tilesrc fp =
+convertMbtiles :: MapboxStyle -> FilePath -> IO ()
+convertMbtiles style fp =
   withConnection fp $ \conn -> do
     zlevels <- query_ conn "select distinct zoom_level from map order by zoom_level"
     for_ zlevels $ \(Only zoom) -> do
       putStrLn $ "Shrinking zoom: " <> show zoom
-      let filtList = styleToCFilters tilesrc zoom style
+      let filtList = styleToCFilters zoom style
 
       (tiles :: [Only T.Text]) <- query conn "select tile_id from map where zoom_level=?" (Only zoom)
       putStrLn $ "Tiles: " <> show (length tiles)
@@ -199,19 +205,19 @@ convertMbtiles style tilesrc fp =
           let restile = filterVectorTile filtList vtile
           execute conn "update images set tile_data=? where tile_id=?" (compress (cs (untile restile)), tileid)
 
-runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> T.Text -> FilePath -> Bool -> IO ()
-runWebServer port mstyle tilesrc mbpath lazyUpdate =
+runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> Bool -> IO ()
+runWebServer port mstyle mbpath lazyUpdate =
   withConnection mbpath $ \conn -> do
     -- If lazy, add a column to a table
     when lazyUpdate $
       execute_ conn "alter table images add column shrinked default 0"
         `catchAny` \_ -> return ()
-
     -- Generate a JSON to be included as a metadata file
+    metaJson <- genJson conn
+    -- Run a web server
     scotty port $ do
-      get "/metadata.json" $ do
-          json ["tes" :: String]
-      get "/:mt1/:z/:x/:y" $ do
+      get "/tiles/metadata.json" $ json metaJson
+      get "/tiles/:mt1/:z/:x/:y" $ do
           z :: Int <- param "z"
           x :: Int <- param "x"
           y :: Int <- param "y"
@@ -230,6 +236,12 @@ runWebServer port mstyle tilesrc mbpath lazyUpdate =
               raw dta
             Nothing -> raw ""
   where
+    genJson conn = do
+
+      return $ AE.object [
+
+        ]
+
     -- Get tile from modified database; if not already shrinked, shrink it and write to the database
     getLazyTile conn style z x tms_y = do
       rows <- liftIO $ query conn "select tile_data, map.tile_id, shrinked from images,map where zoom_level=? AND tile_column=? AND tile_row=? AND map.tile_id=images.tile_id"
@@ -238,7 +250,7 @@ runWebServer port mstyle tilesrc mbpath lazyUpdate =
         [(dta, _, 1 :: Int)] -> return (Just dta)
         [(dta, tileid :: T.Text, _)] -> do
             -- Shrink
-            let cstyles = styleToCFilters tilesrc z style
+            let cstyles = styleToCFilters z style
             case tile (cs (decompress dta)) of
               Left err -> raise (cs err)
               Right dtile -> do
@@ -258,7 +270,7 @@ runWebServer port mstyle tilesrc mbpath lazyUpdate =
             Nothing -> return (Just dta)
             Just (style,_) -> do
               -- Shrink
-              let cstyles = styleToCFilters tilesrc z style
+              let cstyles = styleToCFilters z style
               case tile (cs (decompress dta)) of
                 Left err -> raise (cs err)
                 Right dtile -> return $ Just (compress . cs . untile . filterVectorTile cstyles $ dtile)
@@ -271,19 +283,16 @@ main = do
 
   case opts of
     CmdDump{fMvtSource, fZoomLevel, fStyle} -> do
-        style <- getStyle fStyle
-        checkStyle style tilesrc
-        dumpPbf style tilesrc fZoomLevel fMvtSource
+        style <- getStyle fStyle >>= checkStyle tilesrc
+        dumpPbf style fZoomLevel fMvtSource
     CmdMbtiles{fMbtiles, fStyle} -> do
-        style <- getStyle fStyle
-        checkStyle style tilesrc
-        convertMbtiles style tilesrc fMbtiles
+        style <- getStyle fStyle >>= checkStyle tilesrc
+        convertMbtiles style fMbtiles
     CmdWebServer{fModStyle, fWebPort, fMbtiles, fLazyUpdate} -> do
         mstyle <- case fModStyle of
             Nothing -> return Nothing
             Just fp -> do
-              st <- getStyle fp
-              checkStyle st tilesrc
+              st <- getStyle fp  >>= checkStyle tilesrc
               fstat <- getFileStatus fp
               return (Just (st, modificationTime fstat))
-        runWebServer fWebPort mstyle tilesrc fMbtiles fLazyUpdate
+        runWebServer fWebPort mstyle fMbtiles fLazyUpdate
