@@ -218,10 +218,9 @@ typeCheck env (UApp fname args) =
     "has" | [arg] <- args -> do
         mname <- typeCheck env arg >>= forceType TTStr
         return (TCheckMeta mname ::: TTBool)
-    _| fname `elem` ["==", "!="], [arg1, arg2] <- args -> do
+    _| Just op <- lookup fname [("==", CEq), ("!=", CNeq)], [arg1, arg2] <- args -> do
             (marg1 ::: t1) <- typeCheck env arg1
             (marg2 ::: t2) <- typeCheck env arg2
-            let op = if fname == "==" then CEq else CNeq
             case testEquality t1 t2 of
               Just Refl ->
                 case t1 of
@@ -244,9 +243,9 @@ typeCheck env (UApp fname args) =
                   _     -> Left "Cannot compare other than str/num"
               Nothing -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
                               <> ": " <> show t1 <> "vs. " <> show t2)
-    _| fname `elem` ["any", "all"] -> do
+    _| Just op <- lookup fname [("any", BAny), ("all", BAll)] -> do
         margs <- traverse (typeCheck env >=> forceType TTBool) args
-        return (TBoolFunc (if fname == "any" then BAny else BAll) margs ::: TTBool)
+        return (TBoolFunc op margs ::: TTBool)
     "geometry-type" | [] <- args -> return (TReadAttr GeometryType ::: TTStr)
     _     -> Left ("Unknown function name / wrong param count: " <> fname)
 
