@@ -15,6 +15,7 @@ import           Control.Lens                         (filtered, over, toListOf,
                                                        _1)
 import           Control.Monad                        (when)
 import           Control.Monad.IO.Class               (liftIO)
+import           Data.Aeson                           ((.=))
 import qualified Data.Aeson                           as AE
 import           Data.Bool                            (bool)
 import qualified Data.ByteString                      as BS
@@ -35,13 +36,14 @@ import           Geography.VectorTile                 (Layer, VectorTile,
                                                        layers, linestrings,
                                                        metadata, name, points,
                                                        polygons, tile, untile)
-import           Options.Applicative                  hiding (style)
+import           Options.Applicative                  hiding (header, style)
 import           System.Posix.Files                   (getFileStatus,
                                                        modificationTime)
 import           System.Posix.Types                   (EpochTime)
-import           Web.Scotty                           (addHeader, get, json,
-                                                       next, param, raise, raw,
-                                                       scotty, setHeader)
+import           Text.Read                            (readMaybe)
+import           Web.Scotty                           (addHeader, get, header,
+                                                       json, next, param, raise,
+                                                       raw, scotty, setHeader)
 
 import           Mapbox.Interpret                     (CompiledExpr,
                                                        FeatureType (..),
@@ -83,7 +85,7 @@ styleToCFilters zoom =
     combineFilters :: CompiledExpr Bool -> CompiledExpr Bool -> CompiledExpr Bool
     combineFilters fa fb = (fa >>= bool (lift Nothing) (return True)) <|> fb
 
-    acceptFilter (src,_,_,minz,maxz) = zoomMinOk minz && zoomMaxOk maxz
+    acceptFilter (_,_,_,minz,maxz) = zoomMinOk minz && zoomMaxOk maxz
 
     zoomMinOk Nothing     = True
     zoomMinOk (Just minz) = zoom >= minz
@@ -213,10 +215,17 @@ runWebServer port mstyle mbpath lazyUpdate =
       execute_ conn "alter table images add column shrinked default 0"
         `catchAny` \_ -> return ()
     -- Generate a JSON to be included as a metadata file
-    metaJson <- genJson conn
     -- Run a web server
     scotty port $ do
-      get "/tiles/metadata.json" $ json metaJson
+      get "/tiles/metadata.json" $ do
+          -- find out protocol and host
+          proto <- fromMaybe "http" <$> header "X-Forwarded-Proto"
+          host <- fromMaybe "localhost" <$> header "Host"
+          dbmtime <- liftIO $ getDbMtime conn
+          let stmtime = maybe 0 snd mstyle
+          let mtime = dbmtime <> "_" <> show stmtime
+          metaJson <- liftIO $ genJson conn (cs mtime) proto host
+          json metaJson
       get "/tiles/:mt1/:z/:x/:y" $ do
           z :: Int <- param "z"
           x :: Int <- param "x"
@@ -229,6 +238,7 @@ runWebServer port mstyle mbpath lazyUpdate =
 
           addHeader "Access-Control-Allow-Origin" "*"
           setHeader "Content-Type" "application/x-protobuf"
+          -- TODO: cache-control
 
           case mnewtile of
             Just dta -> do
@@ -236,11 +246,40 @@ runWebServer port mstyle mbpath lazyUpdate =
               raw dta
             Nothing -> raw ""
   where
-    genJson conn = do
+    getDbMtime conn = do
+      mlines :: [Only String] <- query_ conn "select value from metadata where name='mtime'"
+      case mlines of
+        [Only res] -> return res
+        _          -> return ""
 
-      return $ AE.object [
+    genJson conn minfo proto host = do
+      metalines :: [(T.Text,String)] <- query_ conn "select name,value from metadata"
+      return $ AE.object $
+          concatMap addMetaLine metalines
+          ++ ["tiles" .= [proto <> "://" <> host <> "/tiles/" <> minfo <> "/{z}/{x}/{y}"],
+              "metaversion" .= ("2.0.0" :: T.Text) -- Fakt??
+              ]
 
-        ]
+    addMetaLine (key,val)
+      | key `elem` ["attribution", "description", "name", "format", "basename"] =
+            [key .= val]
+      | key `elem` ["minzoom", "maxzoom", "pixel_scale"],
+        Just (dnum :: Int) <- readMaybe val =
+            [key .= dnum]
+      | key == "json", Just (AE.Object obj) <- AE.decode (cs val) =
+            HMap.toList obj
+      -- TODO: mtime, planettime??
+      | key == "center", Just (lst :: [Double]) <- decodeArr val =
+          [key .= lst]
+      | key == "bounds", Just lst@[_ :: Double, _,_,_] <- decodeArr val =
+          [key .= lst]
+      | otherwise = []
+      where
+        split _ [] = []
+        split c lst =
+            let (start,rest) = span (/= c) lst
+            in start : split c (drop 1 rest)
+        decodeArr = traverse readMaybe . split ','
 
     -- Get tile from modified database; if not already shrinked, shrink it and write to the database
     getLazyTile conn style z x tms_y = do
