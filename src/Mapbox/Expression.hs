@@ -180,6 +180,7 @@ instance Show (TExp a) where
 
 type Env = HMap.HashMap T.Text ATExp
 
+-- | Check that the input expression conforms to the requested type
 forceType :: TTyp a -> ATExp -> Either T.Text (TExp a)
 forceType t1 (mexp ::: t2) =
   case testEquality t1 t2 of
@@ -187,6 +188,7 @@ forceType t1 (mexp ::: t2) =
     Nothing -> Left ("Expression " <> T.pack (show mexp) <> " has type " <> T.pack (show t2)
                       <> ", expected " <> T.pack (show t1))
 
+-- | Convert untyped expression to a typed expression
 typeCheck :: Env -> UExp -> Either T.Text ATExp
 typeCheck _ (UNum num) = Right (TNum num ::: TTNum)
 typeCheck _ (UStr str) = Right (TStr str ::: TTStr)
@@ -249,7 +251,7 @@ typeCheck env (UApp fname args) =
     "geometry-type" | [] <- args -> return (TReadAttr GeometryType ::: TTStr)
     _     -> Left ("Unknown function name / wrong param count: " <> fname)
 
-
+-- | Convert an untyped expression to a filter (Bool) expression
 typeCheckFilter :: UExp -> Either String (TExp Bool)
 typeCheckFilter uexp =
   case typeCheck mempty uexp of

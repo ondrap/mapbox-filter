@@ -1,7 +1,6 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GADTs              #-}
 {-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE TemplateHaskell    #-}
 
 module Mapbox.Interpret (
@@ -42,6 +41,7 @@ makeLenses ''FeatureInfo
 
 type CompiledExpr a = ReaderT FeatureInfo Maybe a
 
+-- | Convert a typed expression into a runnable expression
 compileExpr :: TExp a -> CompiledExpr a
 compileExpr (TNum n)     = return n
 compileExpr (TStr s)     = return s
@@ -77,6 +77,7 @@ compileExpr (TConvert False restyp ((vexpr ::: vtyp):rest)) =
     Just Refl -> compileExpr vexpr <|> tryNextArg
     Nothing | TTAny <- vtyp -> do
                   env <- ask
+                  -- Handle correctly cases where subexpression fails
                   case runReaderT (compileExpr vexpr) env of
                     Nothing -> tryNextArg
                     Just dres ->
@@ -92,14 +93,11 @@ compileExpr (TBoolFunc bf exprs) = do
   case bf of
     BAny -> return (or barr)
     BAll -> return (and barr)
-compileExpr (TCmpOp op e1 e2) = do
-    -- We have to handle 'nulls' correctly in comparisons (or not??)
-    env <- ask
-    let v1 = runReaderT (compileExpr e1) env
-    let v2 = runReaderT (compileExpr e2) env
-    -- v1 <- compileExpr e1
-    -- v2 <- compileExpr e2
-    return (top v1 v2)
+compileExpr (TCmpOp op e1 e2) =
+    -- The position of 'nulls' is strange, it is actually not possible to get
+    -- a null when working with vector tiles; when we get a 'null', the behaviour
+    -- is treated as a failure everywhere, except conversion functions (tested)
+    top <$> compileExpr e1 <*> compileExpr e2
   where
     top = case op of
       CEq  -> (==)
@@ -116,7 +114,8 @@ compileExpr (TOrdOp op e1 e2) = do
       CLt  -> (<)
       CLeq -> (<=)
 
-runFilter :: CompiledExpr Bool -> FeatureType -> forall gs. Feature gs -> Bool
+-- | Run compiled expression on a particular feature
+runFilter :: CompiledExpr Bool -> FeatureType -> Feature gs -> Bool
 runFilter cexpr ftype f =
   let finfo = FeatureInfo (_featureId f) ftype (_metadata f)
   in fromMaybe False (runReaderT cexpr finfo)

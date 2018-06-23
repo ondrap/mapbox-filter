@@ -58,3 +58,13 @@ $ mapbox-filter publish
 
 This started as a way to learn typechecking in Haskell and how to make a typed AST using GADTs.
 It took about 1 day to make it work and it practically worked on the first try. Haskell is impressive.
+
+The filtering could theoretically try to remove metadata that is not used in the actual filter.
+This could be achieved in 2 ways:
+- complete expression support, add recursion-schemes capability to `TExp` so that it would be possible
+  to extract the `TReadMeta`/`TCheckMeta` constructors + attribute access from string interpolation
+- a 'fake' parser that would go through `UExp` tree and just rip out the data from `UApp` and `UStr`.
+  This would be probably very simple and would work well.
+
+However, given that most of the metadata that is not used are different language names for an attribute
+and this is very likely compressed by gzip, the gains from this are likely to be negligible.
