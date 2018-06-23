@@ -45,11 +45,13 @@ to the database.
 $ mapbox-filter web -p 3000 -j openmaptiles.json.js -l cz.mbtiles
 ```
 
-Publish filtered mbtile to S3. Higher parallelism might be desirable, try adding
-e.g. `+RTS -N10` to achieve e.g. parallelism of 10 (this will run more OS threads instead
-of more 'sparks', but that probably won't be a problem).
+Publish filtered mbtile to S3. Higher parallelism might be desirable, use the `-p`
+parameter to facilitate parallel uploads to S3.
 ```
-$ mapbox-filter publish -j openmaptiles.json.js -u https://s3.eu-central-1.amazonaws.com/my-test-bucket/styled-map -t s3://my-test-bucket/styled-map cz.mbtiles
+$ mapbox-filter publish 
+  -j openmaptiles.json.js 
+  -u https://s3.eu-central-1.amazonaws.com/my-test-bucket/styled-map
+  -t s3://my-test-bucket/styled-map -p 10 cz.mbtiles
 ```
 
 ## What next

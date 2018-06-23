@@ -113,13 +113,15 @@ s3Bucket :: ReadM BucketName
 s3Bucket = maybeReader s3Reader
   where
     s3Reader txt = BucketName . stripRightSlash <$> T.stripPrefix "s3://" (T.pack txt)
-    stripRightSlash txt = fromMaybe txt (T.stripSuffix "/" txt)
+
+stripRightSlash :: T.Text -> T.Text
+stripRightSlash txt = fromMaybe txt (T.stripSuffix "/" txt)
 
 publishOptions :: Parser CmdLine
 publishOptions =
   CmdPublish <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
             <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
-            <*> (T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
+            <*> (stripRightSlash . T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
             <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
             <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
             <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
@@ -141,10 +143,7 @@ getStyle fname = do
   bstyle <- BS.readFile fname
   case AE.eitherDecodeStrict bstyle of
     Right res -> return res
-    Left err -> do
-      putStrLn err
-      error "Parsing mapbox style failed"
-
+    Left err  -> error ("Parsing mapbox style failed: " <> err)
 
 -- | Check that the user correctly specified the source name and filter it out
 checkStyle :: Maybe T.Text -> MapboxStyle -> IO MapboxStyle
@@ -190,7 +189,7 @@ genMetadata conn modTimeStr urlPrefix = do
             in start : split c (drop 1 rest)
         decodeArr = traverse readMaybe . split ','
 
-
+-- | Dump content of the mbtiles with hints about if the features are removed or retained
 dumpPbf :: MapboxStyle -> Int -> FilePath -> IO ()
 dumpPbf style zoom fp = do
   mvt <- BS.readFile fp
@@ -309,9 +308,9 @@ runWebServer port mstyle mbpath lazyUpdate =
           addHeader "Access-Control-Allow-Origin" "*"
           json metaJson
       get "/tiles/:mt1/:z/:x/:y" $ do
-          z :: Int <- param "z"
+          z <- param "z"
           x :: Int <- param "x"
-          y :: Int <- param "y"
+          y <- param "y"
           let tms_y = yzFlipTms y z
 
           mnewtile <- case (mstyle, lazyUpdate) of
