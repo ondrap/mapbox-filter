@@ -9,8 +9,8 @@ import           Control.Concurrent.ParallelIO.Global (globalPool,
 import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
                                                        withPool)
 import           Control.Exception.Safe               (bracket, catchAny)
-import           Control.Lens                         ((%~), (&), (?~), (^.),
-                                                       (^..), (^?))
+import           Control.Lens                         (over, (%~), (&), (?~),
+                                                       (^.), (^..), (^?), _Just)
 import           Control.Monad                        (void, when, (>=>))
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
@@ -55,8 +55,9 @@ import           Web.Scotty                           (addHeader, get, header,
 import           Mapbox.Filters
 import           Mapbox.Interpret                     (FeatureType (..),
                                                        runFilter)
-import           Mapbox.Style                         (MapboxStyle, lSource,
-                                                       msLayers, _VectorType)
+import           Mapbox.Style                         (MapboxStyle, lMinZoom,
+                                                       lSource, msLayers,
+                                                       _VectorType)
 
 
 data CmdLine =
@@ -138,12 +139,19 @@ progOpts :: ParserInfo CmdLine
 progOpts = info (cmdLineParser <**> helper)
     ( fullDesc <> progDesc "Utilities for working with Mapbox style file")
 
-getStyle :: FilePath -> IO MapboxStyle
-getStyle fname = do
+-- | Return style, update style minzoom levels to maxzoom if bigger
+--
+-- It is possible for the mbtiles to provide maxzoom of 14 and style to be for maxzoom 17.
+-- Therefore we update minzoom in the styles to be the maximum zoom in DB; this
+-- ensures that the features stay in the mbtiles database
+getStyle :: FilePath -> Int -> IO MapboxStyle
+getStyle fname dbmaxzoom = do
   bstyle <- BS.readFile fname
   case AE.eitherDecodeStrict bstyle of
-    Right res -> return res
+    Right res ->
+      return $ res & over (msLayers . traverse . _VectorType . lMinZoom . _Just) (min dbmaxzoom)
     Left err  -> error ("Parsing mapbox style failed: " <> err)
+
 
 -- | Check that the user correctly specified the source name and filter it out
 checkStyle :: Maybe T.Text -> MapboxStyle -> IO MapboxStyle
@@ -359,25 +367,33 @@ runWebServer port mstyle mbpath lazyUpdate =
 main :: IO ()
 main = do
   opts <- execParser progOpts
-
   case opts of
     CmdDump{fMvtSource, fZoomLevel, fStyle, fSourceName} -> do
-        style <- getStyle fStyle >>= checkStyle fSourceName
+        style <- getStyle fStyle 14 >>= checkStyle fSourceName
         dumpPbf style fZoomLevel fMvtSource
     CmdMbtiles{fMbtiles, fStyle, fSourceName} -> do
-        style <- getStyle fStyle >>= checkStyle fSourceName
+        style <- getMaxZoom fMbtiles >>= getStyle fStyle >>= checkStyle fSourceName
         convertMbtiles style fMbtiles
     CmdWebServer{fModStyle, fWebPort, fMbtiles, fLazyUpdate, fSourceName} -> do
-        mstyle <- getMStyle fModStyle fSourceName
+        maxzoom <- getMaxZoom fMbtiles
+        mstyle <- getMStyle fModStyle fSourceName maxzoom
         runWebServer fWebPort mstyle fMbtiles fLazyUpdate
     CmdPublish{fModStyle, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles, fThreads } -> do
-        mstyle <- getMStyle fModStyle fSourceName
+        maxzoom <- getMaxZoom fMbtiles
+        mstyle <- getMStyle fModStyle fSourceName maxzoom
         runPublishJob fThreads mstyle fMbtiles fUrlPrefix fStoreTgt
   where
-    getMStyle stname tilesrc =
+    -- We need to adjust minZoom in the styles to be at least the maximum zoom level
+    -- in the database
+    getMaxZoom dbname = do
+      [Only maxzoom] <- withConnection dbname $ \conn ->
+             query_ conn "select max(zoom_level) from tiles"
+      return maxzoom
+
+    getMStyle stname tilesrc maxzoom =
       case stname of
         Nothing -> return Nothing
         Just fp -> do
-          st <- getStyle fp  >>= checkStyle tilesrc
+          st <- getStyle fp maxzoom >>= checkStyle tilesrc
           fstat <- getFileStatus fp
           return (Just (st, modificationTime fstat))
