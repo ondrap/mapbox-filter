@@ -115,7 +115,7 @@ s3Bucket = maybeReader s3Reader
     s3Reader txt = BucketName . stripRightSlash <$> T.stripPrefix "s3://" (T.pack txt)
 
 stripRightSlash :: T.Text -> T.Text
-stripRightSlash txt = fromMaybe txt (T.stripSuffix "/" txt)
+stripRightSlash = T.dropWhileEnd (== '/')
 
 publishOptions :: Parser CmdLine
 publishOptions =
@@ -199,7 +199,7 @@ dumpPbf style zoom fp = do
       for_ (vtile ^.. layers . traverse) $ \l -> do
           T.putStrLn "-----------------------------"
           T.putStrLn ("Layer: " <> cs (l ^. name))
-          let lfilter = getLayerFilter (l ^. name) cfilters
+          let lfilter = cfExpr (getLayerFilter (l ^. name) cfilters)
           for_ (l ^. points) (printCont lfilter Point)
           for_ (l ^. linestrings) (printCont lfilter LineString)
           for_ (l ^. polygons) (printCont lfilter Polygon)
