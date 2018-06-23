@@ -10,7 +10,7 @@ import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
                                                        withPool)
 import           Control.Exception.Safe               (bracket, catchAny)
 import           Control.Lens                         ((%~), (&), (?~), (^.),
-                                                       (^..), _1)
+                                                       (^..), (^?))
 import           Control.Monad                        (void, when, (>=>))
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
@@ -56,7 +56,7 @@ import           Mapbox.Filters
 import           Mapbox.Interpret                     (FeatureType (..),
                                                        runFilter)
 import           Mapbox.Style                         (MapboxStyle, lSource,
-                                                       msLayers, _VectorLayer)
+                                                       msLayers, _VectorType)
 
 
 data CmdLine =
@@ -149,7 +149,7 @@ getStyle fname = do
 checkStyle :: Maybe T.Text -> MapboxStyle -> IO MapboxStyle
 checkStyle mtilesrc styl = do
   -- Print vector styles
-  let sources = nub (styl ^.. msLayers . traverse . _VectorLayer . _1)
+  let sources = nub (styl ^.. msLayers . traverse . _VectorType . lSource)
   for_ sources $ \s ->
     T.putStrLn $ "Found vector source layer: " <> s
   tilesrc <- case sources of
@@ -157,7 +157,7 @@ checkStyle mtilesrc styl = do
          | Nothing <- mtilesrc -> return nm
     lst | Just nm <- mtilesrc, nm `elem` lst -> return nm
         | otherwise -> error ("Invalid tile source specified, " <> show mtilesrc)
-  return $ styl & msLayers %~ filter (\l -> l ^. lSource == tilesrc)
+  return $ styl & msLayers %~ filter (\l -> l ^? _VectorType . lSource == Just tilesrc)
 
 -- | Generate metadata json based on modification text + database + other info
 genMetadata :: Connection -> TL.Text -> TL.Text -> IO AE.Value

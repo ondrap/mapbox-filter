@@ -21,7 +21,9 @@ import           Geography.VectorTile      (Layer, VectorTile, layers,
 
 import           Mapbox.Interpret          (CompiledExpr, FeatureType (..),
                                             runFilter)
-import           Mapbox.Style              (MapboxStyle, msLayers, _VectorLayer)
+import           Mapbox.Style              (MapboxStyle, lFilter, lMaxZoom,
+                                            lMinZoom, lSourceLayer, msLayers,
+                                            _VectorType)
 
 
 type CFilters = HMap.HashMap BL.ByteString (CompiledExpr Bool)
@@ -52,14 +54,14 @@ filterVectorTile layerFilters =
 styleToCFilters :: Int -> MapboxStyle -> CFilters
 styleToCFilters zoom =
     HMap.fromListWith combineFilters
-  . map (\(_, srclayer, mfilter, _, _) -> (cs srclayer, fromMaybe (return True) mfilter))
-  . toListOf (msLayers . traverse . _VectorLayer . filtered acceptFilter)
+  . map (\l -> (cs (l ^. lSourceLayer), fromMaybe (return True) (l ^. lFilter)))
+  . toListOf (msLayers . traverse . _VectorType . filtered acceptFilter)
   where
     -- 'Or' on expressions, but if first fails, still try the second
     combineFilters :: CompiledExpr Bool -> CompiledExpr Bool -> CompiledExpr Bool
     combineFilters fa fb = (fa >>= bool (lift Nothing) (return True)) <|> fb
 
-    acceptFilter (_,_,_,minz,maxz) = zoomMinOk minz && zoomMaxOk maxz
+    acceptFilter l = zoomMinOk (l ^. lMinZoom) && zoomMaxOk (l ^. lMaxZoom)
 
     zoomMinOk Nothing     = True
     zoomMinOk (Just minz) = zoom >= minz

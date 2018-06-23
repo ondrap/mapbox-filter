@@ -12,18 +12,19 @@ import qualified Data.Text         as T
 import           Mapbox.Expression (typeCheckFilter)
 import           Mapbox.Interpret  (CompiledExpr, compileExpr)
 
-data Layer =
-  VectorLayer {
+data VectorLayer = VectorLayer {
     _lSource      :: T.Text
   , _lSourceLayer :: T.Text
   , _lFilter      :: Maybe (CompiledExpr Bool)
   , _lMinZoom     :: Maybe Int
   , _lMaxZoom     :: Maybe Int
-} | RasterLayer {
-    _lSource :: T.Text
 }
+makeLenses ''VectorLayer
+
+data Layer =
+    VectorType VectorLayer
+  | RasterLayer T.Text
 makePrisms ''Layer
-makeLenses ''Layer
 
 instance FromJSON Layer where
   parseJSON = AE.withObject "Layer" $ \o -> do
@@ -32,14 +33,14 @@ instance FromJSON Layer where
     _lMaxZoom <- o .:? "maxzoom"
     ltype <- o .: "type"
     case (ltype :: T.Text) of
-      "raster" -> return RasterLayer{..}
+      "raster" -> return (RasterLayer _lSource)
       _ -> do
         _lSourceLayer <- o .: "source-layer"
         flt <- o .:? "filter"
         _lFilter <- case flt of
             Nothing   -> return Nothing
             Just uexp -> either fail (return . Just) (compileExpr <$> typeCheckFilter uexp)
-        return VectorLayer{..}
+        return (VectorType VectorLayer{..})
 
 data MapboxStyle = MapboxStyle {
     _msLayers :: [Layer]
