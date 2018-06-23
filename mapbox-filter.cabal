@@ -40,6 +40,7 @@ library
       Mapbox.Style
       Mapbox.Interpret
       Mapbox.Filters
+      Mapbox.UntypedExpression
   default-language: Haskell2010
   ghc-options: -Wall -Wcompat
 
