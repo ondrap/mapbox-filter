@@ -14,7 +14,7 @@ import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
 import           Control.Exception.Safe               (bracket, catchAny)
 import           Control.Lens                         (over, (%~), (&), (?~),
                                                        (^.), (^..), (^?), _Just)
-import           Control.Monad                        (void, when, (>=>))
+import           Control.Monad                        (void, when)
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
 import qualified Data.Aeson                           as AE
@@ -257,7 +257,9 @@ runFilterJob table pool conn mstyle saveAction = do
       let iaction = case mstyle of
             Just style -> shrinkTile (styleToCFilters zoom style)
             Nothing    -> saveAction
-      parallel_ pool $ (fetchTile >=> iaction) <$> tiles
+      let job tid = (fetchTile tid >>= iaction)
+                      `catchAny` \err -> putStrLn ("Error on " <> show tid <> ": " <> show err)
+      parallel_ pool $ job <$> tiles
     -- If we were shrinking, call vacuum on database, otherwise skip it
     for_ mstyle $ \_ -> execute_ conn "vacuum"
   where
