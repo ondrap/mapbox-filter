@@ -1,6 +1,8 @@
+{-# LANGUAGE MultiWayIf          #-}
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE ViewPatterns        #-}
 
 module Main where
@@ -74,6 +76,7 @@ data CmdLine =
   | CmdMbtiles {
       fStyles     :: NonEmpty FilePath
     , fSourceName :: Maybe T.Text
+    , fForceFull  :: Bool
     , fMbtiles    :: FilePath
   }
   | CmdWebServer {
@@ -89,6 +92,7 @@ data CmdLine =
     , fUrlPrefix  :: T.Text
     , fStoreTgt   :: BucketName
     , fThreads    :: Maybe Int
+    , fForceFull  :: Bool
     , fMbtiles    :: FilePath
   }
 
@@ -107,6 +111,7 @@ mbtileOptions :: Parser CmdLine
 mbtileOptions =
   CmdMbtiles <$> nsome (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
             <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+            <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
             <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 webOptions :: Parser CmdLine
@@ -133,6 +138,7 @@ publishOptions =
             <*> (stripRightSlash . T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
             <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
             <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
+            <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
             <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 cmdLineParser  :: Parser CmdLine
@@ -159,8 +165,6 @@ getStyle fnames =
     case AE.eitherDecodeStrict bstyle of
       Right res -> return res
       Left err  -> error ("Parsing mapbox style failed: " <> err)
-getStyle _ = error "At least one style must be specified" -- This should not happen
-
 
 -- | Check that the user correctly specified the source name and filter it out
 --
@@ -266,11 +270,44 @@ runFilterJob table pool conn mstyle saveAction = do
         Left err -> putStrLn $ "Error when decoding tile " <> show tileid <> ": " <> cs err
         Right newdta -> saveAction (tid, newdta)
 
+runIncrFilterJob ::
+     T.Text -- ^ Table name for handling incremental data
+  -> Pool -- ^ Threadpool for parallel processing
+  -> Connection -- ^ Connection to sqlite db
+  -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
+  -> Bool -- ^ Force a full upload (reset saved information)
+  -> JobAction -- ^ Action to perform on filtered tile
+  -> IO ()
+runIncrFilterJob table pool conn mstyle forceFull saveAction = do
+    createTable
+    runFilterJob table pool conn mstyle $  \p@((z,x,y,_), _) -> do
+      saveAction p
+      execute conn
+        (Query ("delete from " <> table <> " where zoom_level=? and tile_column=? and tile_row=?"))
+        (z,x,y)
+      -- delete from table
+  where
+    -- Return true if the working table exists
+    tableExists =
+      (void (query_ @(Only Int) conn (Query ("select count(*) from " <> table))) >> return True)
+        `catchAny` \_ -> return False
+    createTable = do
+      exists <- tableExists
+      if | not exists || forceFull -> do
+            execute_ conn (Query ("drop table " <> table)) `catchAny` \_ -> return ()
+            execute_ conn (Query ("create table " <> table <> " as select zoom_level,tile_column,tile_row,tile_id from map")) `catchAny` \_ -> return ()
+            execute_ conn (Query ("create INDEX "<> table <> "_index ON " <> table <> " (zoom_level,tile_column,tile_row)"))
+            putStrLn "Doing full database work"
+         | otherwise ->
+            putStrLn "Doing incremental work"
+      [Only (cnt :: Int)] <- query_ conn (Query ("select count(*) from " <> table))
+      putStrLn ("Need to process " <> show cnt <> " tiles")
+
 -- | Filter all tiles in a database and save the filtered tiles back
-convertMbtiles :: MapboxStyle -> FilePath -> IO ()
-convertMbtiles style mbtiles = do
+convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()
+convertMbtiles style mbtiles force = do
   withConnection mbtiles $ \conn ->
-    runFilterJob "map" globalPool conn (Just style) $ \((_,_,_,tileid), newdta) ->
+    runIncrFilterJob "shrink_queue" globalPool conn (Just style) force $ \((_,_,_,tileid), newdta) ->
       execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
   stopGlobalPool
 
@@ -281,13 +318,14 @@ runPublishJob ::
   -> FilePath -- ^ Path to mbtile files
   -> T.Text -- ^ URL prefix for accesing the tiles
   -> BucketName -- ^ Target S3 bucket
+  -> Bool
   -> IO ()
-runPublishJob mthreads mstyle mbtiles urlPrefix storeTgt = do
+runPublishJob mthreads mstyle mbtiles urlPrefix storeTgt force = do
   env <- newEnv Discover
   withThreads $ \pool ->
     withConnection mbtiles $ \conn -> do
       modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-      runFilterJob "map" pool conn (fst <$> mstyle) $ \((z,x,y,_), newdta) -> do
+      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) force $ \((z,x,y,_), newdta) -> do
         let xyz_y = yzFlipTms y z
             dstpath = ObjectKey (cs ("tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y))
         runResourceT $ runAWS env $ do
@@ -398,18 +436,18 @@ main = do
     CmdDump{fMvtSource, fZoomLevel, fStyles, fSourceName} -> do
         style <- getStyle fStyles >>= checkStyle fSourceName 14
         dumpPbf style fZoomLevel fMvtSource
-    CmdMbtiles{fMbtiles, fStyles, fSourceName} -> do
+    CmdMbtiles{fMbtiles, fStyles, fSourceName, fForceFull} -> do
         maxzoom <- getMaxZoom fMbtiles
         style <- getStyle fStyles >>= checkStyle fSourceName maxzoom
-        convertMbtiles style fMbtiles
+        convertMbtiles style fMbtiles fForceFull
     CmdWebServer{fModStyles, fWebPort, fMbtiles, fLazyUpdate, fSourceName} -> do
         maxzoom <- getMaxZoom fMbtiles
         mstyle <- getMStyle fModStyles fSourceName maxzoom
         runWebServer fWebPort mstyle fMbtiles fLazyUpdate
-    CmdPublish{fModStyles, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles, fThreads } -> do
+    CmdPublish{fModStyles, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles, fThreads, fForceFull } -> do
         maxzoom <- getMaxZoom fMbtiles
         mstyle <- getMStyle fModStyles fSourceName maxzoom
-        runPublishJob fThreads mstyle fMbtiles fUrlPrefix fStoreTgt
+        runPublishJob fThreads mstyle fMbtiles fUrlPrefix fStoreTgt fForceFull
   where
     -- We need to adjust minZoom in the styles to be at least the maximum zoom level
     -- in the database
