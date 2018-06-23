@@ -144,18 +144,21 @@ progOpts = info (cmdLineParser <**> helper)
 -- It is possible for the mbtiles to provide maxzoom of 14 and style to be for maxzoom 17.
 -- Therefore we update minzoom in the styles to be the maximum zoom in DB; this
 -- ensures that the features stay in the mbtiles database
-getStyle :: FilePath -> Int -> IO MapboxStyle
-getStyle fname dbmaxzoom = do
+getStyle :: FilePath -> IO MapboxStyle
+getStyle fname = do
   bstyle <- BS.readFile fname
   case AE.eitherDecodeStrict bstyle of
-    Right res ->
-      return $ res & over (msLayers . traverse . _VectorType . lMinZoom . _Just) (min dbmaxzoom)
+    Right res -> return res
     Left err  -> error ("Parsing mapbox style failed: " <> err)
 
 
 -- | Check that the user correctly specified the source name and filter it out
-checkStyle :: Maybe T.Text -> MapboxStyle -> IO MapboxStyle
-checkStyle mtilesrc styl = do
+--
+-- It is possible for the mbtiles to provide maxzoom of 14 and style to be for maxzoom 17.
+-- Therefore we update minzoom in the styles to be the maximum zoom in DB; this
+-- ensures that the features stay in the mbtiles database
+checkStyle :: Maybe T.Text -> Int -> MapboxStyle -> IO MapboxStyle
+checkStyle mtilesrc dbmaxzoom styl = do
   -- Print vector styles
   let sources = nub (styl ^.. msLayers . traverse . _VectorType . lSource)
   for_ sources $ \s ->
@@ -166,6 +169,7 @@ checkStyle mtilesrc styl = do
     lst | Just nm <- mtilesrc, nm `elem` lst -> return nm
         | otherwise -> error ("Invalid tile source specified, " <> show mtilesrc)
   return $ styl & msLayers %~ filter (\l -> l ^? _VectorType . lSource == Just tilesrc)
+                & over (msLayers . traverse . _VectorType . lMinZoom . _Just) (min dbmaxzoom)
 
 -- | Generate metadata json based on modification text + database + other info
 genMetadata :: Connection -> TL.Text -> TL.Text -> IO AE.Value
@@ -369,10 +373,11 @@ main = do
   opts <- execParser progOpts
   case opts of
     CmdDump{fMvtSource, fZoomLevel, fStyle, fSourceName} -> do
-        style <- getStyle fStyle 14 >>= checkStyle fSourceName
+        style <- getStyle fStyle >>= checkStyle fSourceName 14
         dumpPbf style fZoomLevel fMvtSource
     CmdMbtiles{fMbtiles, fStyle, fSourceName} -> do
-        style <- getMaxZoom fMbtiles >>= getStyle fStyle >>= checkStyle fSourceName
+        maxzoom <- getMaxZoom fMbtiles
+        style <- getStyle fStyle >>= checkStyle fSourceName maxzoom
         convertMbtiles style fMbtiles
     CmdWebServer{fModStyle, fWebPort, fMbtiles, fLazyUpdate, fSourceName} -> do
         maxzoom <- getMaxZoom fMbtiles
@@ -394,6 +399,6 @@ main = do
       case stname of
         Nothing -> return Nothing
         Just fp -> do
-          st <- getStyle fp maxzoom >>= checkStyle tilesrc
+          st <- getStyle fp >>= checkStyle tilesrc maxzoom
           fstat <- getFileStatus fp
           return (Just (st, modificationTime fstat))
