@@ -102,10 +102,8 @@ compileExpr (TCmpOp op e1 e2) =
     top = case op of
       CEq  -> (==)
       CNeq -> (/=)
-compileExpr (TOrdOp op e1 e2) = do
-    v1 <- compileExpr e1
-    v2 <- compileExpr e2
-    return (top v1 v2)
+compileExpr (TOrdOp op e1 e2) =
+    top <$> compileExpr e1 <*> compileExpr e2
   where
     top :: Ord a => a -> a -> Bool
     top = case op of

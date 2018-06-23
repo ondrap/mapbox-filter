@@ -1,4 +1,4 @@
-# Mapbox-filter - filtering mbtile file according to Mapbox styles
+# Mapbox-filter - filtering mbtiles file according to Mapbox styles
 
 A library that can interpret a subset of the Mapbox style epxression, a very simplified
 parser for the Mapbox style JSON and an executable that can:
@@ -13,7 +13,7 @@ parser for the Mapbox style JSON and an executable that can:
   take a very long time, incremental and parallel upload is supported.
 
 This library supports only a subset of the expression language (https://www.mapbox.com/mapbox-gl-js/style-spec/#expressions-types).
-This is because I don't need that and most of the language isn't going to be used in the filter expression anyway. If you need
+It's because I don't need that and most of the language isn't going to be used in the filter expression anyway. If you need
 features that are not implemented yet, create an issue.
 
 The filtering first executes the filtering expression and removes features that will not

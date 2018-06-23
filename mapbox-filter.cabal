@@ -1,8 +1,8 @@
 name:           mapbox-filter
 version:        0.1.0.0
-description:    Please see the README on GitHub at <https://github.com/githubuser/osm-shrink#readme>
-homepage:       https://github.com/githubuser/osm-shrink#readme
-bug-reports:    https://github.com/githubuser/osm-shrink/issues
+description:    Tools for working with vector Mapbox mbtiles files
+homepage:       https://github.com/ondrap/mapbox-filter
+bug-reports:    https://github.com/ondrap/mapbox-filter/issues
 author:         Ondrej Palkovsky
 maintainer:     palkovsky.ondrej@gmail.com
 copyright:      2018 Ondrej Palkovsky
@@ -15,9 +15,9 @@ extra-source-files:
     ChangeLog.md
     README.md
 
--- source-repository head
---   type: git
---   location: https://github.com/githubuser/osm-shrink
+source-repository head
+  type: git
+  location: https://github.com/ondrap/mapbox-filter
 
 library
   hs-source-dirs:
@@ -72,16 +72,3 @@ executable mapbox-filter
     , amazonka
     , amazonka-s3
   default-language: Haskell2010
-
--- test-suite mapbox-filter-test
---   type: exitcode-stdio-1.0
---   main-is: Spec.hs
---   hs-source-dirs:
---       test
---   ghc-options: -threaded -rtsopts -with-rtsopts=-N
---   build-depends:
---       base >=4.7 && <5
---     , osm-shrink
---   other-modules:
---       Paths_osm_shrink
---   default-language: Haskell2010
