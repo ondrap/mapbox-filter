@@ -35,6 +35,7 @@ library
     , lens
     , string-conversions
     , zlib
+    , recursion-schemes
   exposed-modules:
       Mapbox.Expression
       Mapbox.Style

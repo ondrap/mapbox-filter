@@ -20,6 +20,7 @@ module Mapbox.Expression (
 
 import           Control.Monad            ((>=>))
 import           Data.Bool                (bool)
+import           Data.Functor.Foldable    (Fix (..))
 import qualified Data.HashMap.Strict      as HMap
 import           Data.Monoid              ((<>))
 import           Data.Scientific          (Scientific)
@@ -150,17 +151,17 @@ forceType t1 (mexp ::: t2) =
 
 -- | Convert untyped expression to a typed expression
 typeCheck :: Env -> UExp -> Either T.Text ATExp
-typeCheck _ (UNum num) = Right (TNum num ::: TTNum)
-typeCheck _ (UStr str) = Right (TStr str ::: TTStr)
-typeCheck _ (UBool b) = Right (TBool b ::: TTBool)
-typeCheck _ (UNumArr n) = Right (TNumArr n ::: TTNumArr)
-typeCheck env (UVar var) =
+typeCheck _ (Fix (UNum num)) = Right (TNum num ::: TTNum)
+typeCheck _ (Fix (UStr str)) = Right (TStr str ::: TTStr)
+typeCheck _ (Fix (UBool b)) = Right (TBool b ::: TTBool)
+typeCheck _ (Fix (UNumArr n)) = Right (TNumArr n ::: TTNumArr)
+typeCheck env (Fix (UVar var)) =
     maybe (Left ("Variable " <> var <> " not found.")) Right (HMap.lookup var env)
-typeCheck env (ULet var expr next) =
+typeCheck env (Fix (ULet var expr next)) =
     case typeCheck env expr of
       Left err  -> Left err
       Right res -> typeCheck (HMap.insert var res env) next
-typeCheck env (UApp fname args) =
+typeCheck env (Fix (UApp fname args)) =
   case fname of
     "string" -> do
         eargs <- traverse (typeCheck env) args
