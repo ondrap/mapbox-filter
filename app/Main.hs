@@ -260,8 +260,6 @@ runFilterJob table pool conn mstyle saveAction = do
       let job tid = (fetchTile tid >>= iaction)
                       `catchAny` \err -> putStrLn ("Error on " <> show tid <> ": " <> show err)
       parallel_ pool $ job <$> tiles
-    -- If we were shrinking, call vacuum on database, otherwise skip it
-    for_ mstyle $ \_ -> execute_ conn "vacuum"
   where
     fetchTile tid@(_,_,_,tileid) = do
       [Only (tdata :: BL.ByteString)] <- query conn "select tile_data from images where tile_id=?" (Only tileid)
@@ -308,9 +306,11 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
 -- | Filter all tiles in a database and save the filtered tiles back
 convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()
 convertMbtiles style mbtiles force = do
-  withConnection mbtiles $ \conn ->
+  withConnection mbtiles $ \conn -> do
     runIncrFilterJob "shrink_queue" globalPool conn (Just style) force $ \((_,_,_,tileid), newdta) ->
       execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
+    -- If we were shrinking, call vacuum on database
+    execute_ conn "vacuum"
   stopGlobalPool
 
 -- | Publish the mbtile to an S3 target, make it ready for serving

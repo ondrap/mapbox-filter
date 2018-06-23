@@ -157,10 +157,9 @@ typeCheck _ (Fix (UBool b)) = Right (TBool b ::: TTBool)
 typeCheck _ (Fix (UNumArr n)) = Right (TNumArr n ::: TTNumArr)
 typeCheck env (Fix (UVar var)) =
     maybe (Left ("Variable " <> var <> " not found.")) Right (HMap.lookup var env)
-typeCheck env (Fix (ULet var expr next)) =
-    case typeCheck env expr of
-      Left err  -> Left err
-      Right res -> typeCheck (HMap.insert var res env) next
+typeCheck env (Fix (ULet var expr next)) = do
+    res <- typeCheck env expr
+    typeCheck (HMap.insert var res env) next
 typeCheck env (Fix (UApp fname args)) =
   case fname of
     "string" -> do

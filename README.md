@@ -9,7 +9,7 @@ parser for the Mapbox style JSON and an executable that can:
   * serving the tiles from the `mbtile` file
   * serving the real-time filtered tiles
   * after serving a tile saving the compressed tile back to the database (Openmaptiles database only is currently supported in this mode)
-- Publish mbtile to S3 so that you don't need to run a webserver at all. As this can
+- Publish tiles to S3 so that you don't need to run a webserver at all. As this can
   take a very long time, incremental and parallel upload is supported.
 
 This library supports only a subset of the expression language (https://www.mapbox.com/mapbox-gl-js/style-spec/#expressions-types).
