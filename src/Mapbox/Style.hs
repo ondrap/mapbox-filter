@@ -12,10 +12,10 @@ import qualified Data.ByteString.Lazy     as BL
 import           Data.Functor.Foldable    (Fix (..), para)
 import qualified Data.HashMap.Strict      as HMap
 import qualified Data.HashSet             as HSet
+import           Data.Semigroup           (Semigroup (..))
 import           Data.String.Conversions  (cs)
 import qualified Data.Text                as T
 
-import           Data.Semigroup           ((<>))
 import           Mapbox.Expression        (UExp, typeCheckFilter)
 import           Mapbox.Interpret         (CompiledExpr, compileExpr)
 import           Mapbox.UntypedExpression (UExpF (..))
@@ -96,3 +96,6 @@ makeLenses ''MapboxStyle
 instance FromJSON MapboxStyle where
   parseJSON = AE.withObject "Style" $ \o ->
       MapboxStyle <$> o .: "layers"
+
+instance Semigroup MapboxStyle where
+  MapboxStyle l1 <> MapboxStyle l2 = MapboxStyle (l1 <> l2)

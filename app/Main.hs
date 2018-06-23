@@ -1,6 +1,7 @@
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns        #-}
 
 module Main where
 
@@ -21,15 +22,18 @@ import qualified Data.ByteString.Lazy                 as BL
 import           Data.Foldable                        (for_)
 import qualified Data.HashMap.Strict                  as HMap
 import           Data.List                            (nub)
+import           Data.List.NonEmpty                   (NonEmpty, nonEmpty)
 import           Data.Maybe                           (fromMaybe)
-import           Data.Semigroup                       ((<>))
+import           Data.Semigroup                       (sconcat, (<>))
 import           Data.String.Conversions              (cs)
 import qualified Data.Text                            as T
 import qualified Data.Text.IO                         as T
 import qualified Data.Text.Lazy                       as TL
+import           Data.Traversable                     (for)
 import           Database.SQLite.Simple               (Connection, Only (..),
-                                                       execute, execute_, query,
-                                                       query_, withConnection)
+                                                       Query (..), execute,
+                                                       execute_, query, query_,
+                                                       withConnection)
 import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
                                                        polygons, tile)
@@ -62,25 +66,25 @@ import           Mapbox.Style                         (MapboxStyle, lMinZoom,
 
 data CmdLine =
     CmdDump {
-      fStyle      :: FilePath
+      fStyles     :: NonEmpty FilePath
     , fSourceName :: Maybe T.Text
     , fZoomLevel  :: Int
     , fMvtSource  :: FilePath
   }
   | CmdMbtiles {
-      fStyle      :: FilePath
+      fStyles     :: NonEmpty FilePath
     , fSourceName :: Maybe T.Text
     , fMbtiles    :: FilePath
   }
   | CmdWebServer {
-      fModStyle   :: Maybe FilePath
+      fModStyles  :: [FilePath]
     , fSourceName :: Maybe T.Text
     , fWebPort    :: Int
     , fLazyUpdate :: Bool
     , fMbtiles    :: FilePath
   }
   | CmdPublish {
-      fModStyle   :: Maybe FilePath
+      fModStyles  :: [FilePath]
     , fSourceName :: Maybe T.Text
     , fUrlPrefix  :: T.Text
     , fStoreTgt   :: BucketName
@@ -88,22 +92,26 @@ data CmdLine =
     , fMbtiles    :: FilePath
   }
 
+-- | The same as 'some', but generate NonEmpty list (makes more sense)
+nsome :: Alternative f => f a -> f (NonEmpty a)
+nsome x = fromMaybe (error "'some' didn't return element") . nonEmpty <$> some x
+
 dumpOptions :: Parser CmdLine
 dumpOptions =
-  CmdDump <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
+  CmdDump <$> nsome (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
           <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
           <*> option auto (short 'z' <> long "zoom" <> help "Tile zoom level")
           <*> argument str (metavar "SRCFILE" <> help "Source file")
 
 mbtileOptions :: Parser CmdLine
 mbtileOptions =
-  CmdMbtiles <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
+  CmdMbtiles <$> nsome (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
             <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
             <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 webOptions :: Parser CmdLine
 webOptions =
-  CmdWebServer <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
+  CmdWebServer <$> many (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
               <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
               <*> option auto (short 'p' <> long "port" <> help "Web port number")
               <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with filtered data")
@@ -120,7 +128,7 @@ stripRightSlash = T.dropWhileEnd (== '/')
 
 publishOptions :: Parser CmdLine
 publishOptions =
-  CmdPublish <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
+  CmdPublish <$> many (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
             <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
             <*> (stripRightSlash . T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
             <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
@@ -144,12 +152,14 @@ progOpts = info (cmdLineParser <**> helper)
 -- It is possible for the mbtiles to provide maxzoom of 14 and style to be for maxzoom 17.
 -- Therefore we update minzoom in the styles to be the maximum zoom in DB; this
 -- ensures that the features stay in the mbtiles database
-getStyle :: FilePath -> IO MapboxStyle
-getStyle fname = do
-  bstyle <- BS.readFile fname
-  case AE.eitherDecodeStrict bstyle of
-    Right res -> return res
-    Left err  -> error ("Parsing mapbox style failed: " <> err)
+getStyle :: NonEmpty FilePath -> IO MapboxStyle
+getStyle fnames =
+  fmap sconcat <$> for fnames $ \fname -> do
+    bstyle <- BS.readFile fname
+    case AE.eitherDecodeStrict bstyle of
+      Right res -> return res
+      Left err  -> error ("Parsing mapbox style failed: " <> err)
+getStyle _ = error "At least one style must be specified" -- This should not happen
 
 
 -- | Check that the user correctly specified the source name and filter it out
@@ -225,13 +235,20 @@ dumpPbf style zoom fp = do
 type JobAction = ((Int, Int, Int, T.Text), BL.ByteString) -> IO ()
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
-runFilterJob :: Pool -> Connection -> Maybe MapboxStyle -> JobAction -> IO ()
-runFilterJob pool conn mstyle saveAction = do
-    zlevels <- query_ conn "select distinct zoom_level from map order by zoom_level"
+runFilterJob ::
+     T.Text  -- ^ Table name that contains tiles that should be processed
+  -> Pool -- ^ Threadpool for parallel processing
+  -> Connection -- ^ Connection to sqlite db
+  -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
+  -> JobAction -- ^ Action to perform on filtered tile
+  -> IO ()
+runFilterJob table pool conn mstyle saveAction = do
+    zlevels <- query_ conn (Query ("select distinct zoom_level from " <> table <> " order by zoom_level"))
     for_ zlevels $ \(Only zoom) -> do
       putStrLn $ "Filtering zoom: " <> show zoom
 
-      (tiles :: [(Int,Int,Int,T.Text)]) <- query conn "select zoom_level,tile_column,tile_row,tile_id from map where zoom_level=?" (Only zoom)
+      let qry = Query ("select zoom_level,tile_column,tile_row,tile_id from " <> table <> " where zoom_level=?")
+      (tiles :: [(Int,Int,Int,T.Text)]) <- query conn qry (Only zoom)
       putStrLn $ "Tiles: " <> show (length tiles)
       let iaction = case mstyle of
             Just style -> shrinkTile (styleToCFilters zoom style)
@@ -253,18 +270,24 @@ runFilterJob pool conn mstyle saveAction = do
 convertMbtiles :: MapboxStyle -> FilePath -> IO ()
 convertMbtiles style mbtiles = do
   withConnection mbtiles $ \conn ->
-    runFilterJob globalPool conn (Just style) $ \((_,_,_,tileid), newdta) ->
+    runFilterJob "map" globalPool conn (Just style) $ \((_,_,_,tileid), newdta) ->
       execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
   stopGlobalPool
 
 -- | Publish the mbtile to an S3 target, make it ready for serving
-runPublishJob :: Maybe Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> T.Text -> BucketName -> IO ()
+runPublishJob ::
+    Maybe Int -- ^ Custome parallelism
+  -> Maybe (MapboxStyle, EpochTime) -- ^ Parsed style + modification time of the style
+  -> FilePath -- ^ Path to mbtile files
+  -> T.Text -- ^ URL prefix for accesing the tiles
+  -> BucketName -- ^ Target S3 bucket
+  -> IO ()
 runPublishJob mthreads mstyle mbtiles urlPrefix storeTgt = do
   env <- newEnv Discover
   withThreads $ \pool ->
     withConnection mbtiles $ \conn -> do
       modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-      runFilterJob pool conn (fst <$> mstyle) $ \((z,x,y,_), newdta) -> do
+      runFilterJob "map" pool conn (fst <$> mstyle) $ \((z,x,y,_), newdta) -> do
         let xyz_y = yzFlipTms y z
             dstpath = ObjectKey (cs ("tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y))
         runResourceT $ runAWS env $ do
@@ -372,20 +395,20 @@ main :: IO ()
 main = do
   opts <- execParser progOpts
   case opts of
-    CmdDump{fMvtSource, fZoomLevel, fStyle, fSourceName} -> do
-        style <- getStyle fStyle >>= checkStyle fSourceName 14
+    CmdDump{fMvtSource, fZoomLevel, fStyles, fSourceName} -> do
+        style <- getStyle fStyles >>= checkStyle fSourceName 14
         dumpPbf style fZoomLevel fMvtSource
-    CmdMbtiles{fMbtiles, fStyle, fSourceName} -> do
+    CmdMbtiles{fMbtiles, fStyles, fSourceName} -> do
         maxzoom <- getMaxZoom fMbtiles
-        style <- getStyle fStyle >>= checkStyle fSourceName maxzoom
+        style <- getStyle fStyles >>= checkStyle fSourceName maxzoom
         convertMbtiles style fMbtiles
-    CmdWebServer{fModStyle, fWebPort, fMbtiles, fLazyUpdate, fSourceName} -> do
+    CmdWebServer{fModStyles, fWebPort, fMbtiles, fLazyUpdate, fSourceName} -> do
         maxzoom <- getMaxZoom fMbtiles
-        mstyle <- getMStyle fModStyle fSourceName maxzoom
+        mstyle <- getMStyle fModStyles fSourceName maxzoom
         runWebServer fWebPort mstyle fMbtiles fLazyUpdate
-    CmdPublish{fModStyle, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles, fThreads } -> do
+    CmdPublish{fModStyles, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles, fThreads } -> do
         maxzoom <- getMaxZoom fMbtiles
-        mstyle <- getMStyle fModStyle fSourceName maxzoom
+        mstyle <- getMStyle fModStyles fSourceName maxzoom
         runPublishJob fThreads mstyle fMbtiles fUrlPrefix fStoreTgt
   where
     -- We need to adjust minZoom in the styles to be at least the maximum zoom level
@@ -395,10 +418,8 @@ main = do
              query_ conn "select max(zoom_level) from tiles"
       return maxzoom
 
-    getMStyle stname tilesrc maxzoom =
-      case stname of
-        Nothing -> return Nothing
-        Just fp -> do
-          st <- getStyle fp >>= checkStyle tilesrc maxzoom
-          fstat <- getFileStatus fp
-          return (Just (st, modificationTime fstat))
+    getMStyle (nonEmpty -> Just stlist) tilesrc maxzoom = do
+        st <- getStyle stlist >>= checkStyle tilesrc maxzoom
+        mtimes <- fmap modificationTime <$> traverse getFileStatus stlist
+        return (Just (st, maximum mtimes))
+    getMStyle _ _ _ = return Nothing
