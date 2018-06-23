@@ -15,6 +15,11 @@ This library supports only a subset of the expression language (https://www.mapb
 This is because I don't need that and most of the language isn't going to be used in the filter expression anyway. If you need
 features that are not implemented yet, create an issue.
 
+The filtering first executes the filtering expression and removes features that will not
+be displayed. Then it removes metadata that is not used in the styles. The removal
+process is currently somewhat crude (it retains all metadata used at the particular layer),
+but it should be enough for most usecases.
+
 ## How to compile
 
 1. Install stack - https://docs.haskellstack.org/en/stable/README/
@@ -58,13 +63,3 @@ $ mapbox-filter publish
 
 This started as a way to learn typechecking in Haskell and how to make a typed AST using GADTs.
 It took about 1 day to make it work and it practically worked on the first try. Haskell is impressive.
-
-The filtering could theoretically try to remove metadata that is not used in the actual filter.
-This could be achieved in 2 ways:
-- complete expression support, add recursion-schemes capability to `TExp` so that it would be possible
-  to extract the `TReadMeta`/`TCheckMeta` constructors + attribute access from string interpolation
-- a 'fake' parser that would go through `UExp` tree and just rip out the data from `UApp` and `UStr`.
-  This would be probably very simple and would work well.
-
-However, given that most of the metadata that is not used are different language names for an attribute
-and this is very likely compressed by gzip, the gains from this are likely to be negligible.

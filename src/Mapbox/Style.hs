@@ -8,7 +8,6 @@ module Mapbox.Style where
 import           Control.Lens             (makeLenses, makePrisms, (^.))
 import           Data.Aeson               (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson               as AE
-import           Data.Bifunctor           (first)
 import qualified Data.ByteString.Lazy     as BL
 import           Data.Functor.Foldable    (Fix (..), para)
 import qualified Data.HashMap.Strict      as HMap
