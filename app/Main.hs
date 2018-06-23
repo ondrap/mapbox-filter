@@ -4,9 +4,11 @@
 
 module Main where
 
-import           Control.Concurrent.ParallelIO.Global (parallel_,
+import           Control.Concurrent.ParallelIO.Global (globalPool,
                                                        stopGlobalPool)
-import           Control.Exception.Safe               (catchAny)
+import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
+                                                       withPool)
+import           Control.Exception.Safe               (bracket, catchAny)
 import           Control.Lens                         ((%~), (&), (?~), (^.),
                                                        (^..), _1)
 import           Control.Monad                        (void, when, (>=>))
@@ -81,26 +83,30 @@ data CmdLine =
     , fSourceName :: Maybe T.Text
     , fUrlPrefix  :: T.Text
     , fStoreTgt   :: BucketName
+    , fThreads    :: Maybe Int
     , fMbtiles    :: FilePath
   }
 
 dumpOptions :: Parser CmdLine
-dumpOptions = CmdDump <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
-                      <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
-                      <*> option auto (short 'z' <> long "zoom" <> help "Tile zoom level")
-                      <*> argument str (metavar "SRCFILE" <> help "Source file")
+dumpOptions =
+  CmdDump <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
+          <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+          <*> option auto (short 'z' <> long "zoom" <> help "Tile zoom level")
+          <*> argument str (metavar "SRCFILE" <> help "Source file")
 
 mbtileOptions :: Parser CmdLine
-mbtileOptions = CmdMbtiles <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
-                           <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
-                           <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
+mbtileOptions =
+  CmdMbtiles <$> strOption (short 'j' <> long "style" <> help "JSON mapbox style file")
+            <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+            <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 webOptions :: Parser CmdLine
-webOptions = CmdWebServer <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
-                          <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
-                          <*> option auto (short 'p' <> long "port" <> help "Web port number")
-                          <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with filtered data")
-                          <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
+webOptions =
+  CmdWebServer <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
+              <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+              <*> option auto (short 'p' <> long "port" <> help "Web port number")
+              <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with filtered data")
+              <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 
 s3Bucket :: ReadM BucketName
@@ -110,11 +116,13 @@ s3Bucket = maybeReader s3Reader
     stripRightSlash txt = fromMaybe txt (T.stripSuffix "/" txt)
 
 publishOptions :: Parser CmdLine
-publishOptions = CmdPublish <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
-                            <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
-                            <*> (T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
-                            <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map/)")
-                            <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
+publishOptions =
+  CmdPublish <$> optional (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
+            <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+            <*> (T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
+            <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
+            <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
+            <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 cmdLineParser  :: Parser CmdLine
 cmdLineParser =
@@ -206,8 +214,8 @@ dumpPbf style zoom fp = do
 type JobAction = ((Int, Int, Int, T.Text), BL.ByteString) -> IO ()
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
-runFilterJob :: Connection -> Maybe MapboxStyle -> JobAction -> IO ()
-runFilterJob conn mstyle saveAction = do
+runFilterJob :: Pool -> Connection -> Maybe MapboxStyle -> JobAction -> IO ()
+runFilterJob pool conn mstyle saveAction = do
     zlevels <- query_ conn "select distinct zoom_level from map order by zoom_level"
     for_ zlevels $ \(Only zoom) -> do
       putStrLn $ "Filtering zoom: " <> show zoom
@@ -217,8 +225,7 @@ runFilterJob conn mstyle saveAction = do
       let iaction = case mstyle of
             Just style -> shrinkTile (styleToCFilters zoom style)
             Nothing    -> saveAction
-      parallel_ $ (fetchTile >=> iaction) <$> tiles
-    stopGlobalPool
+      parallel_ pool $ (fetchTile >=> iaction) <$> tiles
     -- If we were shrinking, call vacuum on database, otherwise skip it
     for_ mstyle $ \_ -> execute_ conn "vacuum"
   where
@@ -233,31 +240,37 @@ runFilterJob conn mstyle saveAction = do
 
 -- | Filter all tiles in a database and save the filtered tiles back
 convertMbtiles :: MapboxStyle -> FilePath -> IO ()
-convertMbtiles style mbtiles =
+convertMbtiles style mbtiles = do
   withConnection mbtiles $ \conn ->
-    runFilterJob conn (Just style) $ \((_,_,_,tileid), newdta) ->
+    runFilterJob globalPool conn (Just style) $ \((_,_,_,tileid), newdta) ->
       execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
+  stopGlobalPool
 
 -- | Publish the mbtile to an S3 target, make it ready for serving
-runPublishJob :: Maybe (MapboxStyle, EpochTime) -> FilePath -> T.Text -> BucketName -> IO ()
-runPublishJob mstyle mbtiles urlPrefix storeTgt = do
+runPublishJob :: Maybe Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> T.Text -> BucketName -> IO ()
+runPublishJob mthreads mstyle mbtiles urlPrefix storeTgt = do
   env <- newEnv Discover
-  withConnection mbtiles $ \conn -> do
-    modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-    runFilterJob conn (fst <$> mstyle) $ \((z,x,y,_), newdta) -> do
-      let xyz_y = yzFlipTms y z
-          dstpath = ObjectKey (cs ("tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y))
-      runResourceT $ runAWS env $ do
-        let cmd = putObject storeTgt dstpath (toBody newdta)
-                  & poContentType ?~ "application/x-protobuf"
-                  & poContentEncoding ?~ "gzip"
-                  & poCacheControl ?~ "max-age=31536000"
-        void $ send cmd
-    meta <- genMetadata conn (cs modstr) (cs urlPrefix)
-    let cmd = putObject storeTgt "metadata.json" (toBody (AE.encode meta))
-              & poContentType ?~ "application/json"
-    runResourceT $ runAWS env $
-      void (send cmd)
+  withThreads $ \pool ->
+    withConnection mbtiles $ \conn -> do
+      modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
+      runFilterJob pool conn (fst <$> mstyle) $ \((z,x,y,_), newdta) -> do
+        let xyz_y = yzFlipTms y z
+            dstpath = ObjectKey (cs ("tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y))
+        runResourceT $ runAWS env $ do
+          let cmd = putObject storeTgt dstpath (toBody newdta)
+                    & poContentType ?~ "application/x-protobuf"
+                    & poContentEncoding ?~ "gzip"
+                    & poCacheControl ?~ "max-age=31536000"
+          void $ send cmd
+      meta <- genMetadata conn (cs modstr) (cs urlPrefix)
+      let cmd = putObject storeTgt "metadata.json" (toBody (AE.encode meta))
+                & poContentType ?~ "application/json"
+      runResourceT $ runAWS env $
+        void (send cmd)
+  where
+    withThreads
+      | Just tcount <- mthreads = withPool tcount
+      | otherwise = bracket (return globalPool) (const stopGlobalPool)
 
 -- | Flip y coordinate between xyz and tms schemes
 yzFlipTms :: Int -> Int -> Int
@@ -358,9 +371,9 @@ main = do
     CmdWebServer{fModStyle, fWebPort, fMbtiles, fLazyUpdate, fSourceName} -> do
         mstyle <- getMStyle fModStyle fSourceName
         runWebServer fWebPort mstyle fMbtiles fLazyUpdate
-    CmdPublish{fModStyle, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles } -> do
+    CmdPublish{fModStyle, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles, fThreads } -> do
         mstyle <- getMStyle fModStyle fSourceName
-        runPublishJob mstyle fMbtiles fUrlPrefix fStoreTgt
+        runPublishJob fThreads mstyle fMbtiles fUrlPrefix fStoreTgt
   where
     getMStyle stname tilesrc =
       case stname of
