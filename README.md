@@ -31,6 +31,7 @@ any mbtile file.
 2. `stack setup`
 3. `stack build`
 4. `stack install` - installs binary `mapbox-filter` to ~/.local/bin
+5. or you can run `stack exec -- mapbox-filter` instead without installing
 
 ## Examples
 
