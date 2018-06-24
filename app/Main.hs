@@ -250,17 +250,21 @@ runFilterJob table pool conn mstyle saveAction = do
     zlevels <- query_ conn (Query ("select distinct zoom_level from " <> table <> " order by zoom_level"))
     for_ zlevels $ \(Only zoom) -> do
       putStrLn $ "Filtering zoom: " <> show zoom
-
-      let qry = Query ("select zoom_level,tile_column,tile_row,tile_id from " <> table <> " where zoom_level=?")
-      (tiles :: [(Int,Int,Int,T.Text)]) <- query conn qry (Only zoom)
-      putStrLn $ "Tiles: " <> show (length tiles)
-      let iaction = case mstyle of
-            Just style -> shrinkTile (styleToCFilters zoom style)
-            Nothing    -> saveAction
-      let job tid = (fetchTile tid >>= iaction)
-                      `catchAny` \err -> putStrLn ("Error on " <> show tid <> ": " <> show err)
-      parallel_ pool $ job <$> tiles
+      -- There can be huge amount of tiles, so do it in parallel, column by column
+      let colquery = Query ("select distinct tile_column from " <> table <> " where zoom_level=? order by tile_column")
+      cols :: [Only Int] <- query conn colquery (Only zoom)
+      withPool 5 $ \colPool -> -- Do some low limit for columns
+        parallelFor_ colPool cols $ \(Only col) -> do
+          let qry = Query ("select zoom_level,tile_column,tile_row,tile_id from " <> table <> " where zoom_level=? AND tile_column=?")
+          (tiles :: [(Int,Int,Int,T.Text)]) <- query conn qry (zoom, col)
+          putStrLn $ "Col: " <> show col <> " Tiles: " <> show (length tiles)
+          let iaction = maybe saveAction (\st -> shrinkTile (styleToCFilters zoom st)) mstyle
+          parallelFor_  pool tiles $ \tid ->
+              (fetchTile tid >>= iaction)
+                `catchAny` \err -> putStrLn ("Error on " <> show tid <> ": " <> show err)
   where
+    parallelFor_ pool_ parlist job = parallel_ pool_ (job <$> parlist)
+
     fetchTile tid@(_,_,_,tileid) = do
       [Only (tdata :: BL.ByteString)] <- query conn "select tile_data from images where tile_id=?" (Only tileid)
       return (tid, tdata)
