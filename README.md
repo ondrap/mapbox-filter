@@ -3,7 +3,7 @@
 A library that can interpret a subset of the Mapbox style epxression, a very simplified
 parser for the Mapbox style JSON and an executable that can:
 
-- Dump the uncompressed tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level.
+- Dump the tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level.
 - Iterate through the `mbtiles` file and filter the tile contents according to the MapBox style, thus making the `mbtiles` file smaller.
 - Run a webserver for
   * serving the tiles from the `mbtile` file
