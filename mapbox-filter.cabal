@@ -24,7 +24,7 @@ library
       src
   build-depends:
       base >=4.7 && <5
-    , vectortiles
+    , vectortiles >= 1.4.0
     , bytestring
     , unordered-containers
     , aeson
@@ -56,7 +56,7 @@ executable mapbox-filter
     , string-conversions
     , unordered-containers
     , aeson
-    , vectortiles
+    , vectortiles >= 1.4.0
     , text
     , lens
     , bytestring
