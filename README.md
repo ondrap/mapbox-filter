@@ -3,8 +3,8 @@
 A library that can interpret a subset of the Mapbox style epxression, a very simplified
 parser for the Mapbox style JSON and an executable that can:
 
-- Dump the uncompressed tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level (the .pbf files are often gzipped, you might need to unzip them first).
-- Iterate throught the `mbtiles` file and filter the tile contents according to the MapBox style, thus making the `mbtiles` file smaller.
+- Dump the uncompressed tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level.
+- Iterate through the `mbtiles` file and filter the tile contents according to the MapBox style, thus making the `mbtiles` file smaller.
 - Run a webserver for
   * serving the tiles from the `mbtile` file
   * serving the real-time filtered tiles
@@ -21,8 +21,8 @@ be displayed. Then it removes metadata that is not used in the styles. The remov
 process is currently somewhat crude (it retains all metadata used at the particular layer),
 but it should be enough for most usecases.
 
-Currently only the openmaptiles.org mbtile files are supported for `filter` and
-`publish` commands. The `web` command in non-lazy mode should be compatibile with
+Currently only the openmaptiles.org mbtile files are supported for `filter` command.
+The `publish` and `web` command in non-lazy mode should be compatibile with
 any mbtile file.
 
 ## How to compile
