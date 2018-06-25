@@ -13,8 +13,9 @@ import           Control.Concurrent.ParallelIO.Global (globalPool,
 import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
                                                        withPool)
 import           Control.Exception.Safe               (bracket, catchAny)
-import           Control.Lens                         (over, (%~), (&), (?~),
-                                                       (^.), (^..), (^?), _Just)
+import           Control.Lens                         (over, (%~), (&), (<&>),
+                                                       (?~), (^.), (^..), (^?),
+                                                       _Just)
 import           Control.Monad                        (void, when)
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
@@ -41,14 +42,16 @@ import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
                                                        polygons, tile)
 import           Network.AWS                          (Credentials (Discover),
-                                                       newEnv, runAWS,
-                                                       runResourceT, send,
+                                                       configure, newEnv,
+                                                       runAWS, runResourceT,
+                                                       send, setEndpoint,
                                                        toBody)
 import           Network.AWS.S3                       (BucketName (..),
                                                        ObjectKey (..),
                                                        poCacheControl,
                                                        poContentEncoding,
-                                                       poContentType, putObject)
+                                                       poContentType, putObject,
+                                                       s3)
 import           Options.Applicative                  hiding (header, style)
 import           System.Posix.Files                   (getFileStatus,
                                                        modificationTime)
@@ -65,7 +68,14 @@ import           Mapbox.Interpret                     (FeatureType (..),
 import           Mapbox.Style                         (MapboxStyle, lMinZoom,
                                                        lSource, msLayers,
                                                        _VectorType)
-
+data PublishOpts = PublishOpts {
+    pUrlPrefix  :: T.Text
+  , pStoreTgt   :: BucketName
+  , pThreads    :: Maybe Int
+  , pForceFull  :: Bool
+  , pS3Endpoint :: Maybe BS.ByteString
+  , pMbtiles    :: FilePath
+}
 
 data CmdLine =
     CmdDump {
@@ -88,13 +98,9 @@ data CmdLine =
     , fMbtiles    :: FilePath
   }
   | CmdPublish {
-      fModStyles  :: [FilePath]
-    , fSourceName :: Maybe T.Text
-    , fUrlPrefix  :: T.Text
-    , fStoreTgt   :: BucketName
-    , fThreads    :: Maybe Int
-    , fForceFull  :: Bool
-    , fMbtiles    :: FilePath
+      fModStyles   :: [FilePath]
+    , fSourceName  :: Maybe T.Text
+    , fPublishOpts :: PublishOpts
   }
 
 -- | The same as 'some', but generate NonEmpty list (makes more sense)
@@ -103,22 +109,22 @@ nsome x = fromMaybe (error "'some' didn't return element") . nonEmpty <$> some x
 
 dumpOptions :: Parser CmdLine
 dumpOptions =
-  CmdDump <$> nsome (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
-          <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+  CmdDump <$> nsome (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+          <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
           <*> option auto (short 'z' <> long "zoom" <> help "Tile zoom level")
           <*> argument str (metavar "SRCFILE" <> help "Source file")
 
 mbtileOptions :: Parser CmdLine
 mbtileOptions =
-  CmdMbtiles <$> nsome (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
-            <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+  CmdMbtiles <$> nsome (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+            <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
             <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
             <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 webOptions :: Parser CmdLine
 webOptions =
-  CmdWebServer <$> many (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
-              <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
+  CmdWebServer <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+              <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
               <*> option auto (short 'p' <> long "port" <> help "Web port number")
               <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with filtered data")
               <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
@@ -134,13 +140,17 @@ stripRightSlash = T.dropWhileEnd (== '/')
 
 publishOptions :: Parser CmdLine
 publishOptions =
-  CmdPublish <$> many (strOption (short 'j' <> long "style" <> help "JSON mapbox style file"))
-            <*> optional (T.pack <$> strOption (short 's' <> long "source" <> help "Tile source name"))
-            <*> (stripRightSlash . T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
-            <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
-            <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
-            <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
-            <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
+  CmdPublish
+    <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+    <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
+    <*> (PublishOpts <$>
+         (stripRightSlash . T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
+      <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
+      <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
+      <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
+      <*> optional (strOption (long "s3-endpoint" <> metavar "HOSTNAME" <> help "Endpoint for S3 operations (use e.g. with Google Cloud Storage)"))
+      <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
+    )
 
 cmdLineParser  :: Parser CmdLine
 cmdLineParser =
@@ -327,35 +337,34 @@ convertMbtiles style mbtiles force = do
 
 -- | Publish the mbtile to an S3 target, make it ready for serving
 runPublishJob ::
-    Maybe Int -- ^ Custome parallelism
-  -> Maybe (MapboxStyle, EpochTime) -- ^ Parsed style + modification time of the style
-  -> FilePath -- ^ Path to mbtile files
-  -> T.Text -- ^ URL prefix for accesing the tiles
-  -> BucketName -- ^ Target S3 bucket
-  -> Bool
+     Maybe (MapboxStyle, EpochTime) -- ^ Parsed style + modification time of the style
+  -> PublishOpts
   -> IO ()
-runPublishJob mthreads mstyle mbtiles urlPrefix storeTgt force = do
+runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint} = do
+  -- Generate AWS environ
   env <- newEnv Discover
+        <&> maybe id (\host -> configure (setEndpoint True host 443 s3)) pS3Endpoint
+
   withThreads $ \pool ->
-    withConnection mbtiles $ \conn -> do
+    withConnection pMbtiles $ \conn -> do
       modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) force $ \((z,x,y), newdta) -> do
+      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) pForceFull $ \((z,x,y), newdta) -> do
         let xyz_y = yzFlipTms y z
             dstpath = ObjectKey (cs ("tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y))
         runResourceT $ runAWS env $ do
-          let cmd = putObject storeTgt dstpath (toBody newdta)
+          let cmd = putObject pStoreTgt dstpath (toBody newdta)
                     & poContentType ?~ "application/x-protobuf"
                     & poContentEncoding ?~ "gzip"
                     & poCacheControl ?~ "max-age=31536000"
           void $ send cmd
-      meta <- genMetadata conn (cs modstr) (cs urlPrefix)
-      let cmd = putObject storeTgt "metadata.json" (toBody (AE.encode meta))
+      meta <- genMetadata conn (cs modstr) (cs pUrlPrefix)
+      let cmd = putObject pStoreTgt "metadata.json" (toBody (AE.encode meta))
                 & poContentType ?~ "application/json"
       runResourceT $ runAWS env $
         void (send cmd)
   where
     withThreads
-      | Just tcount <- mthreads = withPool tcount
+      | Just tcount <- pThreads = withPool tcount
       | otherwise = bracket (return globalPool) (const stopGlobalPool)
 
 -- | Flip y coordinate between xyz and tms schemes
@@ -458,10 +467,10 @@ main = do
         maxzoom <- getMaxZoom fMbtiles
         mstyle <- getMStyle fModStyles fSourceName maxzoom
         runWebServer fWebPort mstyle fMbtiles fLazyUpdate
-    CmdPublish{fModStyles, fSourceName, fUrlPrefix, fStoreTgt, fMbtiles, fThreads, fForceFull } -> do
-        maxzoom <- getMaxZoom fMbtiles
+    CmdPublish{fModStyles, fSourceName, fPublishOpts} -> do
+        maxzoom <- getMaxZoom (pMbtiles fPublishOpts)
         mstyle <- getMStyle fModStyles fSourceName maxzoom
-        runPublishJob fThreads mstyle fMbtiles fUrlPrefix fStoreTgt fForceFull
+        runPublishJob mstyle fPublishOpts
   where
     -- We need to adjust minZoom in the styles to be at least the maximum zoom level
     -- in the database

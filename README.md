@@ -35,6 +35,12 @@ any mbtile file.
 
 ## Examples
 
+Show CLI help:
+```
+$ mapbox-filter -h
+$ mapbox-filter publish -h
+```
+
 Apply the style on all the tiles in the `cz.mbtiles`. The process uses all available CPUs.
 You can you use multiple `-j` options to create one file containing data for all styles.
 ```
