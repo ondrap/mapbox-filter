@@ -85,11 +85,11 @@ compileExpr (TConvert False restyp ((vexpr ::: vtyp):rest)) =
   where
     tryNextArg = compileExpr (TConvert False restyp rest)
 compileExpr (TConvert True _ _) = error "Not Implemented"
-compileExpr (TBoolFunc bf exprs) = do
-  barr <- traverse compileExpr exprs
-  case bf of
-    BAny -> return (or barr)
-    BAll -> return (and barr)
+compileExpr (TBoolFunc bf exprs) =
+    bop bf <$> traverse compileExpr exprs
+  where
+    bop BAny = or
+    bop BAll = and
 compileExpr (TCmpOp op e1 e2) =
     -- The position of 'nulls' is strange, it is actually not possible to get
     -- a null when working with vector tiles; when we get a 'null', the behaviour
