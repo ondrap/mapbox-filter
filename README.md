@@ -1,7 +1,7 @@
-# Mapbox-filter - filtering mbtiles file according to Mapbox styles
+# Mapbox-filter - filtering mbtiles file according to Mapbox GL JS styles
 
 A library that can interpret a subset of the Mapbox style epxression, a very simplified
-parser for the Mapbox style JSON and an executable that can:
+parser for the Mapbox GL JS style and an executable that can:
 
 - Dump the tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level.
 - Iterate through the `mbtiles` file and filter the tile contents according to the MapBox style, thus making the `mbtiles` file smaller.
@@ -32,6 +32,8 @@ any mbtile file.
 3. `stack build`
 4. `stack install` - installs binary `mapbox-filter` to ~/.local/bin
 5. or you can run `stack exec -- mapbox-filter` instead without installing
+
+I have not tested it but it will probably work on Windows as well.
 
 ## Examples
 
