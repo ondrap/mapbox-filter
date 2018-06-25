@@ -87,11 +87,11 @@ tValToTTyp TVNum    = TTNum
 tValToTTyp TVStr    = TTStr
 tValToTTyp TVNumArr = TTNumArr
 
-anyValToTVal :: AnyValue -> TValue a -> Maybe a
-anyValToTVal (ABool b) TVBool        = Just b
-anyValToTVal (ANum n) TVNum          = Just n
-anyValToTVal (AStr s) TVStr          = Just s
-anyValToTVal (ANumArray na) TVNumArr = Just na
+anyValToTVal :: TValue a -> AnyValue -> Maybe a
+anyValToTVal TVBool (ABool b)        = Just b
+anyValToTVal TVNum (ANum n)          = Just n
+anyValToTVal TVStr (AStr s)          = Just s
+anyValToTVal TVNumArr (ANumArray na) = Just na
 anyValToTVal _ _                     = Nothing
 
 instance Show (TValue a) where

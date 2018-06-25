@@ -41,6 +41,10 @@ makeLenses ''FeatureInfo
 
 type CompiledExpr a = ReaderT FeatureInfo Maybe a
 
+-- | Fail an expression interpretation
+failExpr :: CompiledExpr a
+failExpr = lift Nothing
+
 -- | Convert a typed expression into a runnable expression
 compileExpr :: TExp a -> CompiledExpr a
 compileExpr (TNum n)     = return n
@@ -63,7 +67,7 @@ compileExpr (TReadMeta tattr) = do
   tname <- compileExpr tattr
   tmeta <- view fiMeta
   case HMap.lookup (cs tname) tmeta of
-    Nothing        -> lift Nothing
+    Nothing        -> failExpr
     Just (St aval) -> return (AStr (cs aval))
     Just (Fl n)    -> return (ANum (fromFloatDigits n))
     Just (Do n)    -> return (ANum (fromFloatDigits n))
@@ -71,20 +75,13 @@ compileExpr (TReadMeta tattr) = do
     Just (W64 n)   -> return (ANum (fromIntegral n))
     Just (S64 n)   -> return (ANum (fromIntegral n))
     Just (B b)     -> return (ABool b)
-compileExpr (TConvert False _ []) = lift Nothing
+compileExpr (TConvert False _ []) = failExpr
 compileExpr (TConvert False restyp ((vexpr ::: vtyp):rest)) =
-  case testEquality (tValToTTyp restyp) vtyp of
-    Just Refl -> compileExpr vexpr <|> tryNextArg
-    Nothing | TTAny <- vtyp -> do
-                  env <- ask
-                  -- Handle correctly cases where subexpression fails
-                  case runReaderT (compileExpr vexpr) env of
-                    Nothing -> tryNextArg
-                    Just dres ->
-                      case anyValToTVal dres restyp of
-                        Just v  -> return v
-                        Nothing -> tryNextArg
-            | otherwise -> tryNextArg
+  ( case testEquality (tValToTTyp restyp) vtyp of
+      Just Refl -> compileExpr vexpr
+      Nothing | TTAny <- vtyp -> compileExpr vexpr >>= maybe failExpr return . anyValToTVal restyp
+              | otherwise -> failExpr
+    ) <|> tryNextArg
   where
     tryNextArg = compileExpr (TConvert False restyp rest)
 compileExpr (TConvert True _ _) = error "Not Implemented"
