@@ -144,7 +144,7 @@ publishOptions =
     <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
     <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
     <*> (PublishOpts <$>
-         (stripRightSlash . T.pack <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
+         (stripRightSlash <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
       <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
       <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
       <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
@@ -165,10 +165,6 @@ progOpts = info (cmdLineParser <**> helper)
     ( fullDesc <> progDesc "Utilities for working with Mapbox style file")
 
 -- | Return style, update style minzoom levels to maxzoom if bigger
---
--- It is possible for the mbtiles to provide maxzoom of 14 and style to be for maxzoom 17.
--- Therefore we update minzoom in the styles to be the maximum zoom in DB; this
--- ensures that the features stay in the mbtiles database
 getStyle :: NonEmpty FilePath -> IO MapboxStyle
 getStyle fnames =
   fmap sconcat <$> for fnames $ \fname -> do

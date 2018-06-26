@@ -46,7 +46,7 @@ $ mapbox-filter publish -h
 Apply the style on all the tiles in the `cz.mbtiles`. The process uses all available CPUs.
 You can you use multiple `-j` options to create one file containing data for all styles.
 ```
-$ mapbox-filter filter -j openmaptiles.json.js cz.mbtiles
+$ mapbox-filter filter -j mapboxstyle.json cz.mbtiles
 ```
 
 Serve the mbtiles file. The endpoint for MapBox is: http://server_name:3000/tiles/metadata.json
@@ -54,22 +54,22 @@ Serve the mbtiles file. The endpoint for MapBox is: http://server_name:3000/tile
 $ mapbox-filter web -p 3000 cz.mbtiles
 ```
 
-Serve the mbtiles file while doing online filtering according to the openmaptiles.json.js file.
+Serve the mbtiles file while doing online filtering according to the mapboxstyle.json file.
 ```
-$ mapbox-filter web -p 3000 -j openmaptiles.json.js cz.mbtiles
+$ mapbox-filter web -p 3000 -j mapboxstyle.json cz.mbtiles
 ```
 
 Serve the mbtiles file, do online filtering on not-yet-filtered tiles, save the filtered tiles back
 to the database.
 ```
-$ mapbox-filter web -p 3000 -j openmaptiles.json.js -l cz.mbtiles
+$ mapbox-filter web -p 3000 -j mapboxstyle.json -l cz.mbtiles
 ```
 
 Publish filtered mbtiles to S3. Higher parallelism might be desirable, use the `-p`
 parameter to facilitate more parallel uploads to S3.
 ```
 $ mapbox-filter publish 
-  -j openmaptiles.json.js 
+  -j mapboxstyle.json
   -u https://s3.eu-central-1.amazonaws.com/my-test-bucket/styled-map
   -t s3://my-test-bucket/styled-map -p 10 cz.mbtiles
 ```
