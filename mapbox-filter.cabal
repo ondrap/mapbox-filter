@@ -73,4 +73,6 @@ executable mapbox-filter
     , amazonka-s3
     , ekg-core
     , async
+    , http-client
+    , http-client-tls
   default-language: Haskell2010

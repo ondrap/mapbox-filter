@@ -8,16 +8,17 @@
 module Main where
 
 import           Codec.Compression.GZip               (decompress)
-import           Control.Concurrent                   (threadDelay)
+import           Control.Concurrent                   (getNumCapabilities,
+                                                       threadDelay)
 import           Control.Concurrent.Async             (race_)
 import           Control.Concurrent.ParallelIO.Global (globalPool,
                                                        stopGlobalPool)
 import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
                                                        withPool)
 import           Control.Exception.Safe               (bracket, catchAny)
-import           Control.Lens                         (over, (%~), (&), (<&>),
-                                                       (?~), (^.), (^..), (^?),
-                                                       _Just)
+import           Control.Lens                         (over, (%~), (&), (.~),
+                                                       (<&>), (?~), (^.), (^..),
+                                                       (^?), _Just)
 import           Control.Monad                        (forever, void, when)
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
@@ -45,16 +46,19 @@ import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
                                                        polygons, tile)
 import           Network.AWS                          (Credentials (Discover),
-                                                       configure, newEnv,
-                                                       runAWS, runResourceT,
-                                                       send, setEndpoint,
-                                                       toBody)
+                                                       configure, envManager,
+                                                       newEnv, runAWS,
+                                                       runResourceT, send,
+                                                       setEndpoint, toBody)
 import           Network.AWS.S3                       (BucketName (..),
                                                        ObjectKey (..),
                                                        poCacheControl,
                                                        poContentEncoding,
                                                        poContentType, putObject,
                                                        s3)
+import           Network.HTTP.Client                  (managerConnCount, managerIdleConnectionCount,
+                                                       newManager)
+import           Network.HTTP.Client.TLS              (tlsManagerSettings)
 import           Options.Applicative                  hiding (header, style)
 import qualified System.Metrics.Counter               as CNT
 import           System.Posix.Files                   (getFileStatus,
@@ -362,9 +366,13 @@ runPublishJob ::
   -> PublishOpts
   -> IO ()
 runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint} = do
+  -- Create http connection manager with higher limits
+  conncount <- maybe getNumCapabilities return pThreads
+  manager <- newManager tlsManagerSettings{managerConnCount=conncount, managerIdleConnectionCount=conncount}
   -- Generate AWS environ
   env <- newEnv Discover
         <&> maybe id (\host -> configure (setEndpoint True host 443 s3)) pS3Endpoint
+        <&> envManager .~ manager
 
   withThreads $ \pool ->
     withConnection pMbtiles $ \conn -> do
