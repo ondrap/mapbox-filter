@@ -267,9 +267,9 @@ type JobAction = ((Int, Int, Int, T.Text), Maybe BL.ByteString) -> IO ()
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
 runFilterJob ::
-     T.Text  -- ^ Table name that contains tiles that should be processed
+     T.Text  -- ^ Table name that contains columns that should be processed
   -> Pool -- ^ Threadpool for parallel processing
-  -> Connection -- ^ Connection to sqlite db
+  -> Connection -- ^ Sqlite DB pool connection
   -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
   -> JobAction -- ^ Action to perform on filtered tile
   -> ((Int, Int) -> IO ()) -- ^ Action to perform when a tile_row is completed
@@ -290,7 +290,7 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
         cols :: [Only Int] <- query conn colquery (Only zoom)
         withPool 2 $ \colPool -> -- Do some low limit for columns
           parallelFor_ colPool cols $ \(Only col) -> do
-            let qry = Query ("select zoom_level,tile_column,tile_row,tile_id from " <> table <> " where zoom_level=? AND tile_column=?")
+            let qry = "select zoom_level,tile_column,tile_row,tile_id from map where zoom_level=? AND tile_column=?"
             (tiles :: [(Int,Int,Int,T.Text)]) <- query conn qry (zoom, col)
             let iaction = maybe (saveAction . second Just)
                                 (\st -> shrinkTile emptycnt (styleToCFilters zoom st))
@@ -344,7 +344,7 @@ runIncrFilterJob ::
 runIncrFilterJob table pool conn mstyle forceFull saveAction = do
     createTable
     runFilterJob ("e_" <> table) pool conn mstyle (\t@((z,x,y,_),_) -> saveAction t >> removeError (z,x,y)) (const (return ())) (const (return ()))
-    runFilterJob ("v_" <> table) pool conn mstyle saveAction rowComplete addToErrTable
+    runFilterJob table pool conn mstyle saveAction rowComplete addToErrTable
   where
     addToErrTable (z,x,y,_) = execute conn (Query ("insert into e_" <> table <> " (zoom_level,tile_column,tile_row) values (?,?,?)")) (z, x, y)
     removeError (z,x,y) = execute conn (Query ("delete from e_" <> table <> " where zoom_level=? AND tile_column=? AND tile_row=?")) (z, x, y)
@@ -359,11 +359,8 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
       if | not exists || forceFull -> do
             execute_ conn (Query ("drop table " <> table)) `catchAny` \_ -> return ()
             execute_ conn (Query ("drop table e_" <> table)) `catchAny` \_ -> return ()
-            execute_ conn (Query ("drop view v_" <> table)) `catchAny` \_ -> return ()
             execute_ conn (Query ("create table " <> table <> " as select distinct zoom_level,tile_column from tiles"))
             execute_ conn (Query ("create INDEX "<> table <> "_index ON " <> table <> " (zoom_level,tile_column)"))
-            execute_ conn (Query ("create view v_" <> table <> " as select t.zoom_level,t.tile_column,d.tile_row,d.tile_id from " <> table <> " t, map d "
-                                  <> " where t.zoom_level=d.zoom_level AND t.tile_column = d.tile_column"))
             execute_ conn (Query ("create table e_" <> table <> " (zoom_level int, tile_column int, tile_row int)"))
             putStrLn "Doing full database work"
          | otherwise ->
