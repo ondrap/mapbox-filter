@@ -259,8 +259,9 @@ runFilterJob ::
   -> Connection -- ^ Connection to sqlite db
   -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
   -> JobAction -- ^ Action to perform on filtered tile
+  -> ((Int, Int) -> IO ()) -- ^ Action to perform when a tile_row is completed
   -> IO ()
-runFilterJob table pool conn mstyle saveAction = do
+runFilterJob table pool conn mstyle saveAction rowComplete = do
     [Only (total_count :: Int64)] <- query_ conn (Query ("select count(*) from " <> table))
     putStrLn ("Need to process " <> show total_count <> " tiles")
     counter <- CNT.new
@@ -279,6 +280,7 @@ runFilterJob table pool conn mstyle saveAction = do
             parallelFor_  pool tiles $ \tid ->
                 (fetchTile tid >>= iaction >> CNT.inc counter)
                   `catchAny` \err -> putStrLn ("Error on " <> show tid <> ": " <> show err)
+            rowComplete (zoom, col)
   where
     parallelFor_ pool_ parlist job = parallel_ pool_ (job <$> parlist)
 
@@ -312,13 +314,10 @@ runIncrFilterJob ::
   -> IO ()
 runIncrFilterJob table pool conn mstyle forceFull saveAction = do
     createTable
-    runFilterJob table pool conn mstyle $  \p@((z,x,y), _) -> do
-      saveAction p
-      execute conn
-        (Query ("delete from " <> table <> " where zoom_level=? and tile_column=? and tile_row=?"))
-        (z,x,y)
-      -- delete from table
+    runFilterJob ("v_" <> table) pool conn mstyle saveAction rowComplete
   where
+    rowComplete (z,x) = execute conn (Query ("delete from " <> table <> " where zoom_level=? AND tile_column=?")) (z, x)
+
     -- Return true if the working table exists
     tableExists =
       (void (query_ @(Only Int) conn (Query ("select count(*) from " <> table))) >> return True)
@@ -327,8 +326,11 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
       exists <- tableExists
       if | not exists || forceFull -> do
             execute_ conn (Query ("drop table " <> table)) `catchAny` \_ -> return ()
-            execute_ conn (Query ("create table " <> table <> " as select zoom_level,tile_column,tile_row from tiles")) `catchAny` \_ -> return ()
-            execute_ conn (Query ("create INDEX "<> table <> "_index ON " <> table <> " (zoom_level,tile_column,tile_row)"))
+            execute_ conn (Query ("drop view v_" <> table)) `catchAny` \_ -> return ()
+            execute_ conn (Query ("create table " <> table <> " as select distinct zoom_level,tile_column from tiles"))
+            execute_ conn (Query ("create INDEX "<> table <> "_index ON " <> table <> " (zoom_level,tile_column)"))
+            execute_ conn (Query ("create view v_" <> table <> " as select t.zoom_level,t.tile_column,d.tile_row from " <> table <> " t, tiles d "
+                                  <> " where t.zoom_level=d.zoom_level AND t.tile_column = d.tile_column"))
             putStrLn "Doing full database work"
          | otherwise ->
             putStrLn "Doing incremental work"
@@ -361,17 +363,19 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
       runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) pForceFull $ \((z,x,y), newdta) -> do
         let xyz_y = yzFlipTms y z
             dstpath = ObjectKey (cs ("tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y))
-        runResourceT $ runAWS env $ do
-          let cmd = putObject pStoreTgt dstpath (toBody newdta)
-                    & poContentType ?~ "application/x-protobuf"
-                    & poContentEncoding ?~ "gzip"
-                    & poCacheControl ?~ "max-age=31536000"
-          void $ send cmd
+        return ()
+        -- runResourceT $ runAWS env $ do
+        --   let cmd = putObject pStoreTgt dstpath (toBody newdta)
+        --             & poContentType ?~ "application/x-protobuf"
+        --             & poContentEncoding ?~ "gzip"
+        --             & poCacheControl ?~ "max-age=31536000"
+        --   void $ send cmd
       meta <- genMetadata conn (cs modstr) (cs pUrlPrefix)
       let cmd = putObject pStoreTgt "metadata.json" (toBody (AE.encode meta))
                 & poContentType ?~ "application/json"
-      runResourceT $ runAWS env $
-        void (send cmd)
+      -- runResourceT $ runAWS env $
+      --   void (send cmd)
+      return ()
   where
     withThreads
       | Just tcount <- pThreads = withPool tcount
