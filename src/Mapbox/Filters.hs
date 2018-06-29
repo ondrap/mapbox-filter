@@ -7,8 +7,7 @@ import           Codec.Compression.GZip    (CompressParams (compressLevel),
                                             bestCompression, compressWith,
                                             decompress, defaultCompressParams)
 import           Control.Applicative       ((<|>))
-import           Control.Lens              (filtered, over, toListOf, (&), (^.),
-                                            (^..))
+import           Control.Lens              (filtered, over, toListOf, (&), (^.))
 import           Control.Monad.Trans.Class (lift)
 import           Data.Bifunctor            (second)
 import           Data.Bool                 (bool)
@@ -52,7 +51,7 @@ filterVectorTile layerFilters =
     checkEmptyTile . over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
   where
     -- Return nothing if there are no layers (and therefore no features) on the tile
-    checkEmptyTile t | null (t ^.. layers)  = Nothing
+    checkEmptyTile t | null (t ^. layers)  = Nothing
                      | otherwise = Just t
 
     nullLayer l = null (l ^. points)
