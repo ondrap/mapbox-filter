@@ -161,7 +161,7 @@ publishOptions =
     <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
     <*> (PublishOpts <$>
          (stripRightSlash <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
-      <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map)")
+      <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map) or filesystem path")
       <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
       <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
       <*> optional (strOption (long "s3-endpoint" <> metavar "HOSTNAME" <> help "Endpoint for S3 operations (use e.g. with Google Cloud Storage)"))
@@ -369,7 +369,7 @@ convertMbtiles style mbtiles force = do
         Just newdta -> execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
         Nothing -> do
           execute conn "delete from map where zoom_level=? AND tile_column=? AND tile_row=?" (z,x,y)
-          execute conn "delete from images where tile_data=? where tile_id=?" (Only tileid)
+          execute conn "delete from images where tile_id=?" (Only tileid)
     -- If we were shrinking, call vacuum on database
     execute_ conn "vacuum"
   stopGlobalPool
