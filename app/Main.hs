@@ -279,19 +279,22 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
     [Only (total_count :: Int64)] <- query_ conn (Query ("select count(*) from " <> table))
     putStrLn ("Need to process " <> show total_count <> " tiles")
     counter <- CNT.new
+    emptycnt <- CNT.new
     -- Take it from tiles directly, we will have more zoom levels but so what
     zlevels <- query_ conn (Query "select distinct zoom_level from tiles order by zoom_level")
-    race_ (showStats total_count counter) $
+    race_ (showStats total_count counter emptycnt) $
       for_ zlevels $ \(Only zoom) -> do
         putStrLn $ "Filtering zoom: " <> show zoom
         -- There can be huge amount of tiles, so do it in parallel, column by column
         let colquery = Query ("select distinct tile_column from " <> table <> " where zoom_level=? order by tile_column")
         cols :: [Only Int] <- query conn colquery (Only zoom)
-        withPool 5 $ \colPool -> -- Do some low limit for columns
+        withPool 2 $ \colPool -> -- Do some low limit for columns
           parallelFor_ colPool cols $ \(Only col) -> do
             let qry = Query ("select zoom_level,tile_column,tile_row from " <> table <> " where zoom_level=? AND tile_column=?")
             (tiles :: [(Int,Int,Int)]) <- query conn qry (zoom, col)
-            let iaction = maybe (saveAction . second Just) (\st -> shrinkTile (styleToCFilters zoom st)) mstyle
+            let iaction = maybe (saveAction . second Just)
+                                (\st -> shrinkTile emptycnt (styleToCFilters zoom st))
+                                mstyle
             parallelFor_  pool tiles $ \tid ->
                 (fetchTile tid >>= iaction >> CNT.inc counter)
                   `catchAny` \err -> do
@@ -301,26 +304,34 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
   where
     parallelFor_ pool_ parlist job = parallel_ pool_ (job <$> parlist)
 
-    showStats total_count counter =
+    showStats total_count counter emptycnt =
       forever $ do
         let delay = 15
         start <- CNT.read counter
         threadDelay (delay * 1000000)
         end <- CNT.read counter
         -- TODO: We should read the system time... but the numbers are not that important
+        emptyc <- CNT.read emptycnt
         let percent = round ((100 :: Double) * fromIntegral end / fromIntegral total_count) :: Int
             speed = round (fromIntegral (end - start) / (fromIntegral delay :: Double)) :: Int
-        putStrLn $ "Completion status: " <> show percent <> "%, speed: " <> show speed <> " tiles/sec"
+        putStrLn $ "Completion status: " <> show percent
+                  <> "%, speed: " <> show speed <> " tiles/sec"
+                  <> " deleted: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral emptyc / fromIntegral end)
+                  <> "%"
 
     fetchTile tid@(z,x,y) = do
       let q = Query "select tile_data from tiles where zoom_level=? and tile_column=? and tile_row=?"
       [Only (tdata :: BL.ByteString)] <- query conn q (z,x,y)
       return (tid, tdata)
 
-    shrinkTile filtList (tid, tdata) =
+    shrinkTile emptycnt filtList (tid, tdata) =
       case filterTileCs filtList tdata of
         Left err -> putStrLn $ "Error when decoding tile " <> show tid <> ": " <> cs err
-        Right newdta -> saveAction (tid, newdta)
+        Right newdta -> do
+          -- Update empty counter
+          maybe (CNT.inc emptycnt) (\_ -> return ()) newdta
+          -- Call job action
+          saveAction (tid, newdta)
 
 runIncrFilterJob ::
      T.Text -- ^ Table name for handling incremental data
