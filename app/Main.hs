@@ -270,7 +270,8 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
     [Only (total_count :: Int64)] <- query_ conn (Query ("select count(*) from " <> table))
     putStrLn ("Need to process " <> show total_count <> " tiles")
     counter <- CNT.new
-    zlevels <- query_ conn (Query ("select distinct zoom_level from " <> table <> " order by zoom_level"))
+    -- Take it from tiles directly, we will have more zoom levels but so what
+    zlevels <- query_ conn (Query ("select distinct zoom_level from tiles order by zoom_level"))
     race_ (showStats total_count counter) $
       for_ zlevels $ \(Only zoom) -> do
         putStrLn $ "Filtering zoom: " <> show zoom
