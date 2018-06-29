@@ -362,7 +362,7 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
             execute_ conn (Query ("drop view v_" <> table)) `catchAny` \_ -> return ()
             execute_ conn (Query ("create table " <> table <> " as select distinct zoom_level,tile_column from tiles"))
             execute_ conn (Query ("create INDEX "<> table <> "_index ON " <> table <> " (zoom_level,tile_column)"))
-            execute_ conn (Query ("create view v_" <> table <> " as select t.zoom_level,t.tile_column,d.tile_row,d.tile_id from " <> table <> " t, tiles d "
+            execute_ conn (Query ("create view v_" <> table <> " as select t.zoom_level,t.tile_column,d.tile_row,d.tile_id from " <> table <> " t, map d "
                                   <> " where t.zoom_level=d.zoom_level AND t.tile_column = d.tile_column"))
             execute_ conn (Query ("create table e_" <> table <> " (zoom_level int, tile_column int, tile_row int)"))
             putStrLn "Doing full database work"
