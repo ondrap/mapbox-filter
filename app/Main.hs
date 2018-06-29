@@ -289,10 +289,11 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
 
     showStats total_count counter =
       forever $ do
-        let delay = 5
+        let delay = 15
         start <- CNT.read counter
         threadDelay (delay * 1000000)
         end <- CNT.read counter
+        -- TODO: We should read the system time... but the numbers are not that important
         let percent = round ((100 :: Double) * fromIntegral end / fromIntegral total_count) :: Int
             speed = round (fromIntegral (end - start) / (fromIntegral delay :: Double)) :: Int
         putStrLn $ "Completion status: " <> show percent <> "%, speed: " <> show speed <> " tiles/sec"
