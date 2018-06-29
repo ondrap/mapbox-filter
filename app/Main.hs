@@ -8,6 +8,8 @@
 module Main where
 
 import           Codec.Compression.GZip               (decompress)
+import           Control.Concurrent                   (threadDelay)
+import           Control.Concurrent.Async             (race_)
 import           Control.Concurrent.ParallelIO.Global (globalPool,
                                                        stopGlobalPool)
 import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
@@ -16,7 +18,7 @@ import           Control.Exception.Safe               (bracket, catchAny)
 import           Control.Lens                         (over, (%~), (&), (<&>),
                                                        (?~), (^.), (^..), (^?),
                                                        _Just)
-import           Control.Monad                        (void, when)
+import           Control.Monad                        (forever, void, when)
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
 import qualified Data.Aeson                           as AE
@@ -25,6 +27,7 @@ import qualified Data.ByteString                      as BS
 import qualified Data.ByteString.Lazy                 as BL
 import           Data.Foldable                        (for_)
 import qualified Data.HashMap.Strict                  as HMap
+import           Data.Int                             (Int64)
 import           Data.List                            (nub)
 import           Data.List.NonEmpty                   (NonEmpty, nonEmpty)
 import           Data.Maybe                           (fromMaybe)
@@ -53,6 +56,7 @@ import           Network.AWS.S3                       (BucketName (..),
                                                        poContentType, putObject,
                                                        s3)
 import           Options.Applicative                  hiding (header, style)
+import qualified System.Metrics.Counter               as CNT
 import           System.Posix.Files                   (getFileStatus,
                                                        modificationTime)
 import           System.Posix.Types                   (EpochTime)
@@ -60,7 +64,6 @@ import           Text.Read                            (readMaybe)
 import           Web.Scotty                           (addHeader, get, header,
                                                        json, param, raise, raw,
                                                        scotty, setHeader)
-
 
 import           Mapbox.Filters
 import           Mapbox.Interpret                     (FeatureType (..),
@@ -258,23 +261,36 @@ runFilterJob ::
   -> JobAction -- ^ Action to perform on filtered tile
   -> IO ()
 runFilterJob table pool conn mstyle saveAction = do
+    [Only (total_count :: Int64)] <- query_ conn (Query ("select count(*) from " <> table))
+    putStrLn ("Need to process " <> show total_count <> " tiles")
+    counter <- CNT.new
     zlevels <- query_ conn (Query ("select distinct zoom_level from " <> table <> " order by zoom_level"))
-    for_ zlevels $ \(Only zoom) -> do
-      putStrLn $ "Filtering zoom: " <> show zoom
-      -- There can be huge amount of tiles, so do it in parallel, column by column
-      let colquery = Query ("select distinct tile_column from " <> table <> " where zoom_level=? order by tile_column")
-      cols :: [Only Int] <- query conn colquery (Only zoom)
-      withPool 5 $ \colPool -> -- Do some low limit for columns
-        parallelFor_ colPool cols $ \(Only col) -> do
-          let qry = Query ("select zoom_level,tile_column,tile_row from " <> table <> " where zoom_level=? AND tile_column=?")
-          (tiles :: [(Int,Int,Int)]) <- query conn qry (zoom, col)
-          putStrLn $ "Col: " <> show col <> " Tiles: " <> show (length tiles)
-          let iaction = maybe saveAction (\st -> shrinkTile (styleToCFilters zoom st)) mstyle
-          parallelFor_  pool tiles $ \tid ->
-              (fetchTile tid >>= iaction)
-                `catchAny` \err -> putStrLn ("Error on " <> show tid <> ": " <> show err)
+    race_ (showStats total_count counter) $
+      for_ zlevels $ \(Only zoom) -> do
+        putStrLn $ "Filtering zoom: " <> show zoom
+        -- There can be huge amount of tiles, so do it in parallel, column by column
+        let colquery = Query ("select distinct tile_column from " <> table <> " where zoom_level=? order by tile_column")
+        cols :: [Only Int] <- query conn colquery (Only zoom)
+        withPool 5 $ \colPool -> -- Do some low limit for columns
+          parallelFor_ colPool cols $ \(Only col) -> do
+            let qry = Query ("select zoom_level,tile_column,tile_row from " <> table <> " where zoom_level=? AND tile_column=?")
+            (tiles :: [(Int,Int,Int)]) <- query conn qry (zoom, col)
+            let iaction = maybe saveAction (\st -> shrinkTile (styleToCFilters zoom st)) mstyle
+            parallelFor_  pool tiles $ \tid ->
+                (fetchTile tid >>= iaction >> CNT.inc counter)
+                  `catchAny` \err -> putStrLn ("Error on " <> show tid <> ": " <> show err)
   where
     parallelFor_ pool_ parlist job = parallel_ pool_ (job <$> parlist)
+
+    showStats total_count counter =
+      forever $ do
+        let delay = 5
+        start <- CNT.read counter
+        threadDelay (delay * 1000000)
+        end <- CNT.read counter
+        let percent = round ((100 :: Double) * fromIntegral end / fromIntegral total_count) :: Int
+            speed = round (fromIntegral (end - start) / (fromIntegral delay :: Double)) :: Int
+        putStrLn $ "Completion status: " <> show percent <> "%, speed: " <> show speed <> " tiles/sec"
 
     fetchTile tid@(z,x,y) = do
       let q = Query "select tile_data from tiles where zoom_level=? and tile_column=? and tile_row=?"
@@ -316,8 +332,6 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
             putStrLn "Doing full database work"
          | otherwise ->
             putStrLn "Doing incremental work"
-      [Only (cnt :: Int)] <- query_ conn (Query ("select count(*) from " <> table))
-      putStrLn ("Need to process " <> show cnt <> " tiles")
 
 -- | Filter all tiles in a database and save the filtered tiles back
 convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()

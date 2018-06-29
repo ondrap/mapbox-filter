@@ -71,4 +71,6 @@ executable mapbox-filter
     , safe-exceptions
     , amazonka
     , amazonka-s3
+    , ekg-core
+    , async
   default-language: Haskell2010
