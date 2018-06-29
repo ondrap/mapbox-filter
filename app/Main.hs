@@ -263,7 +263,7 @@ dumpPbf style zoom fp = do
       let include = runFilter lfilter ptype feature
       putStrLn $ bool "- " "  " include <> show ptype <> " " <> show (feature ^. metadata)
 
-type JobAction = ((Int, Int, Int), Maybe BL.ByteString) -> IO ()
+type JobAction = ((Int, Int, Int, T.Text), Maybe BL.ByteString) -> IO ()
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
 runFilterJob ::
@@ -273,7 +273,7 @@ runFilterJob ::
   -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
   -> JobAction -- ^ Action to perform on filtered tile
   -> ((Int, Int) -> IO ()) -- ^ Action to perform when a tile_row is completed
-  -> ((Int,Int,Int) -> IO ()) -- ^ Error handler
+  -> ((Int,Int,Int,T.Text) -> IO ()) -- ^ Error handler
   -> IO ()
 runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
     [Only (total_count :: Int64)] <- query_ conn (Query ("select count(*) from " <> table))
@@ -290,8 +290,8 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
         cols :: [Only Int] <- query conn colquery (Only zoom)
         withPool 2 $ \colPool -> -- Do some low limit for columns
           parallelFor_ colPool cols $ \(Only col) -> do
-            let qry = Query ("select zoom_level,tile_column,tile_row from " <> table <> " where zoom_level=? AND tile_column=?")
-            (tiles :: [(Int,Int,Int)]) <- query conn qry (zoom, col)
+            let qry = Query ("select zoom_level,tile_column,tile_row,tile_id from " <> table <> " where zoom_level=? AND tile_column=?")
+            (tiles :: [(Int,Int,Int,T.Text)]) <- query conn qry (zoom, col)
             let iaction = maybe (saveAction . second Just)
                                 (\st -> shrinkTile emptycnt (styleToCFilters zoom st))
                                 mstyle
@@ -319,9 +319,9 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
                   <> " deleted: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral emptyc / fromIntegral end)
                   <> "%"
 
-    fetchTile tid@(z,x,y) = do
-      let q = Query "select tile_data from tiles where zoom_level=? and tile_column=? and tile_row=?"
-      [Only (tdata :: BL.ByteString)] <- query conn q (z,x,y)
+    fetchTile tid@(_,_,_,ttid) = do
+      let q = Query "select tile_data from images where tile_id=?"
+      [Only (tdata :: BL.ByteString)] <- query conn q (Only ttid)
       return (tid, tdata)
 
     shrinkTile emptycnt filtList (tid, tdata) =
@@ -343,10 +343,10 @@ runIncrFilterJob ::
   -> IO ()
 runIncrFilterJob table pool conn mstyle forceFull saveAction = do
     createTable
-    runFilterJob ("e_" <> table) pool conn mstyle (\t@((z,x,y),_) -> saveAction t >> removeError (z,x,y)) (const (return ())) (const (return ()))
+    runFilterJob ("e_" <> table) pool conn mstyle (\t@((z,x,y,_),_) -> saveAction t >> removeError (z,x,y)) (const (return ())) (const (return ()))
     runFilterJob ("v_" <> table) pool conn mstyle saveAction rowComplete addToErrTable
   where
-    addToErrTable (z,x,y) = execute conn (Query ("insert into e_" <> table <> " (zoom_level,tile_column,tile_row) values (?,?,?)")) (z, x, y)
+    addToErrTable (z,x,y,_) = execute conn (Query ("insert into e_" <> table <> " (zoom_level,tile_column,tile_row) values (?,?,?)")) (z, x, y)
     removeError (z,x,y) = execute conn (Query ("delete from e_" <> table <> " where zoom_level=? AND tile_column=? AND tile_row=?")) (z, x, y)
     rowComplete (z,x) = execute conn (Query ("delete from " <> table <> " where zoom_level=? AND tile_column=?")) (z, x)
 
@@ -362,7 +362,7 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
             execute_ conn (Query ("drop view v_" <> table)) `catchAny` \_ -> return ()
             execute_ conn (Query ("create table " <> table <> " as select distinct zoom_level,tile_column from tiles"))
             execute_ conn (Query ("create INDEX "<> table <> "_index ON " <> table <> " (zoom_level,tile_column)"))
-            execute_ conn (Query ("create view v_" <> table <> " as select t.zoom_level,t.tile_column,d.tile_row from " <> table <> " t, tiles d "
+            execute_ conn (Query ("create view v_" <> table <> " as select t.zoom_level,t.tile_column,d.tile_row,d.tile_id from " <> table <> " t, tiles d "
                                   <> " where t.zoom_level=d.zoom_level AND t.tile_column = d.tile_column"))
             execute_ conn (Query ("create table e_" <> table <> " (zoom_level int, tile_column int, tile_row int)"))
             putStrLn "Doing full database work"
@@ -373,7 +373,7 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
 convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()
 convertMbtiles style mbtiles force = do
   withConnection mbtiles $ \conn -> do
-    runIncrFilterJob "shrink_queue" globalPool conn (Just style) force $ \((z,x,y), mnewdta) -> do
+    runIncrFilterJob "shrink_queue" globalPool conn (Just style) force $ \((z,x,y,_), mnewdta) -> do
       let q = Query "select tile_id from map where zoom_level=? and tile_column=? and tile_row=?"
       [Only (tileid :: T.Text)] <- query conn q (z,x,y)
       case mnewdta of
@@ -405,7 +405,7 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
   withThreads $ \pool ->
     withConnection pMbtiles $ \conn -> do
       modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) pForceFull $ \((z,x,y), mnewdta) ->
+      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) pForceFull $ \((z,x,y,_), mnewdta) ->
         -- Skip empty tiles
         for_ mnewdta $ \newdta -> do
           let xyz_y = yzFlipTms y z
