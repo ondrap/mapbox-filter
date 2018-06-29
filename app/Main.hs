@@ -23,6 +23,7 @@ import           Control.Monad                        (forever, void, when)
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
 import qualified Data.Aeson                           as AE
+import           Data.Bifunctor                       (second)
 import           Data.Bool                            (bool)
 import qualified Data.ByteString                      as BS
 import qualified Data.ByteString.Lazy                 as BL
@@ -45,7 +46,8 @@ import           Database.SQLite.Simple               (Connection, Only (..),
 import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
                                                        polygons, tile)
-import           Network.AWS                          (Credentials (Discover),
+import           Network.AWS                          (AccessKey (..), Credentials (Discover, FromKeys),
+                                                       SecretKey (..),
                                                        configure, envManager,
                                                        newEnv, runAWS,
                                                        runResourceT, send,
@@ -60,6 +62,8 @@ import           Network.HTTP.Client                  (managerConnCount, manager
                                                        newManager)
 import           Network.HTTP.Client.TLS              (tlsManagerSettings)
 import           Options.Applicative                  hiding (header, style)
+import           System.Directory                     (createDirectoryIfMissing)
+import           System.FilePath.Posix                (takeDirectory, (</>))
 import qualified System.Metrics.Counter               as CNT
 import           System.Posix.Files                   (getFileStatus,
                                                        modificationTime)
@@ -75,9 +79,14 @@ import           Mapbox.Interpret                     (FeatureType (..),
 import           Mapbox.Style                         (MapboxStyle, lMinZoom,
                                                        lSource, msLayers,
                                                        _VectorType)
+
+
+data PublishTarget = PublishFs FilePath | PublishS3 BucketName
+  deriving (Show)
+
 data PublishOpts = PublishOpts {
     pUrlPrefix  :: T.Text
-  , pStoreTgt   :: BucketName
+  , pStoreTgt   :: PublishTarget
   , pThreads    :: Maybe Int
   , pForceFull  :: Bool
   , pS3Endpoint :: Maybe BS.ByteString
@@ -137,10 +146,10 @@ webOptions =
               <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 
-s3Bucket :: ReadM BucketName
-s3Bucket = maybeReader s3Reader
+s3Bucket :: ReadM PublishTarget
+s3Bucket = maybeReader s3Reader <|> maybeReader (Just . PublishFs)
   where
-    s3Reader txt = BucketName . stripRightSlash <$> T.stripPrefix "s3://" (T.pack txt)
+    s3Reader txt = PublishS3 . BucketName . stripRightSlash <$> T.stripPrefix "s3://" (T.pack txt)
 
 stripRightSlash :: T.Text -> T.Text
 stripRightSlash = T.dropWhileEnd (== '/')
@@ -254,7 +263,7 @@ dumpPbf style zoom fp = do
       let include = runFilter lfilter ptype feature
       putStrLn $ bool "- " "  " include <> show ptype <> " " <> show (feature ^. metadata)
 
-type JobAction = ((Int, Int, Int), BL.ByteString) -> IO ()
+type JobAction = ((Int, Int, Int), Maybe BL.ByteString) -> IO ()
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
 runFilterJob ::
@@ -271,7 +280,7 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
     putStrLn ("Need to process " <> show total_count <> " tiles")
     counter <- CNT.new
     -- Take it from tiles directly, we will have more zoom levels but so what
-    zlevels <- query_ conn (Query ("select distinct zoom_level from tiles order by zoom_level"))
+    zlevels <- query_ conn (Query "select distinct zoom_level from tiles order by zoom_level")
     race_ (showStats total_count counter) $
       for_ zlevels $ \(Only zoom) -> do
         putStrLn $ "Filtering zoom: " <> show zoom
@@ -282,7 +291,7 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
           parallelFor_ colPool cols $ \(Only col) -> do
             let qry = Query ("select zoom_level,tile_column,tile_row from " <> table <> " where zoom_level=? AND tile_column=?")
             (tiles :: [(Int,Int,Int)]) <- query conn qry (zoom, col)
-            let iaction = maybe saveAction (\st -> shrinkTile (styleToCFilters zoom st)) mstyle
+            let iaction = maybe (saveAction . second Just) (\st -> shrinkTile (styleToCFilters zoom st)) mstyle
             parallelFor_  pool tiles $ \tid ->
                 (fetchTile tid >>= iaction >> CNT.inc counter)
                   `catchAny` \err -> do
@@ -353,10 +362,14 @@ runIncrFilterJob table pool conn mstyle forceFull saveAction = do
 convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()
 convertMbtiles style mbtiles force = do
   withConnection mbtiles $ \conn -> do
-    runIncrFilterJob "shrink_queue" globalPool conn (Just style) force $ \((z,x,y), newdta) -> do
+    runIncrFilterJob "shrink_queue" globalPool conn (Just style) force $ \((z,x,y), mnewdta) -> do
       let q = Query "select tile_id from map where zoom_level=? and tile_column=? and tile_row=?"
       [Only (tileid :: T.Text)] <- query conn q (z,x,y)
-      execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
+      case mnewdta of
+        Just newdta -> execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
+        Nothing -> do
+          execute conn "delete from map where zoom_level=? AND tile_column=? AND tile_row=?" (z,x,y)
+          execute conn "delete from images where tile_data=? where tile_id=?" (Only tileid)
     -- If we were shrinking, call vacuum on database
     execute_ conn "vacuum"
   stopGlobalPool
@@ -370,28 +383,42 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
   -- Create http connection manager with higher limits
   conncount <- maybe getNumCapabilities return pThreads
   manager <- newManager tlsManagerSettings{managerConnCount=conncount, managerIdleConnectionCount=conncount}
-  -- Generate AWS environ
-  env <- newEnv Discover
+  -- Generate AWS environ; fake AWS keys when publishing to filesystem
+  let credential = case pStoreTgt of
+                    PublishFs{} -> FromKeys (AccessKey "fake") (SecretKey "fake") -- Fake it if we publish to FS
+                    PublishS3{} -> Discover
+  env <- newEnv credential
         <&> maybe id (\host -> configure (setEndpoint True host 443 s3)) pS3Endpoint
         <&> envManager .~ manager
 
   withThreads $ \pool ->
     withConnection pMbtiles $ \conn -> do
       modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) pForceFull $ \((z,x,y), newdta) -> do
-        let xyz_y = yzFlipTms y z
-            dstpath = ObjectKey (cs ("tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y))
-        runResourceT $ runAWS env $ do
-          let cmd = putObject pStoreTgt dstpath (toBody newdta)
-                    & poContentType ?~ "application/x-protobuf"
-                    & poContentEncoding ?~ "gzip"
-                    & poCacheControl ?~ "max-age=31536000"
-          void $ send cmd
+      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) pForceFull $ \((z,x,y), mnewdta) ->
+        -- Skip empty tiles
+        for_ mnewdta $ \newdta -> do
+          let xyz_y = yzFlipTms y z
+              dstpath = "tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y
+          case pStoreTgt of
+            PublishFs root -> do
+              let fpath = root </> dstpath
+              createDirectoryIfMissing True (takeDirectory fpath)
+              BL.writeFile fpath newdta
+            PublishS3 bucket ->
+              runResourceT $ runAWS env $ do
+                let cmd = putObject bucket (ObjectKey (cs dstpath)) (toBody newdta)
+                          & poContentType ?~ "application/x-protobuf"
+                          & poContentEncoding ?~ "gzip"
+                          & poCacheControl ?~ "max-age=31536000"
+                void $ send cmd
       meta <- genMetadata conn (cs modstr) (cs pUrlPrefix)
-      let cmd = putObject pStoreTgt "metadata.json" (toBody (AE.encode meta))
-                & poContentType ?~ "application/json"
-      runResourceT $ runAWS env $
-        void (send cmd)
+      case pStoreTgt of
+        PublishFs root -> BL.writeFile (root </> "metadata.json") (AE.encode meta)
+        PublishS3 bucket -> do
+          let cmd = putObject bucket "metadata.json" (toBody (AE.encode meta))
+                    & poContentType ?~ "application/json"
+          runResourceT $ runAWS env $
+            void (send cmd)
   where
     withThreads
       | Just tcount <- pThreads = withPool tcount
@@ -451,7 +478,7 @@ runWebServer port mstyle mbpath lazyUpdate =
             Just dta -> do
               addHeader "Content-Encoding" "gzip"
               raw dta
-            Nothing -> raw ""
+            Nothing -> raw "" -- Empty tile
   where
     -- Get tile from modified database; if not already shrinked, shrink it and write to the database
     getLazyTile conn style z x tms_y = do
@@ -465,7 +492,7 @@ runWebServer port mstyle mbpath lazyUpdate =
               Right newdta -> do
                 liftIO $ execute conn "update images set tile_data=?,shrinked=1 where tile_id=?"
                               (newdta, tileid)
-                return (Just newdta)
+                return newdta
         _ -> return Nothing
 
     -- Ordinarily get tile from database; if styling enabled, do the styling
@@ -479,7 +506,7 @@ runWebServer port mstyle mbpath lazyUpdate =
             Just (style,_) ->
               case filterTile z style dta of
                 Left err     -> raise (cs err)
-                Right newdta -> return (Just newdta)
+                Right newdta -> return newdta
         _ -> return Nothing
 
 main :: IO ()

@@ -7,7 +7,8 @@ import           Codec.Compression.GZip    (CompressParams (compressLevel),
                                             bestCompression, compressWith,
                                             decompress, defaultCompressParams)
 import           Control.Applicative       ((<|>))
-import           Control.Lens              (filtered, over, toListOf, (&), (^.))
+import           Control.Lens              (filtered, over, toListOf, (&), (^.),
+                                            (^..))
 import           Control.Monad.Trans.Class (lift)
 import           Data.Bifunctor            (second)
 import           Data.Bool                 (bool)
@@ -45,10 +46,15 @@ getLayerFilter lname layerFilters =
   fromMaybe (CFilter (return False) mempty) (HMap.lookup lname layerFilters)
 
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
-filterVectorTile :: CFilters -> VectorTile -> VectorTile
+-- Returns nothing if the resulting tile is empty
+filterVectorTile :: CFilters -> VectorTile -> Maybe VectorTile
 filterVectorTile layerFilters =
-    over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
+    checkEmptyTile . over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
   where
+    -- Return nothing if there are no layers (and therefore no features) on the tile
+    checkEmptyTile t | null (t ^.. layers)  = Nothing
+                     | otherwise = Just t
+
     nullLayer l = null (l ^. points)
                   && null (l ^. linestrings)
                   && null (l ^. polygons)
@@ -89,15 +95,15 @@ styleToCFilters zoom =
     zoomMaxOk (Just maxz) = zoom <= maxz
 
 -- | Decode, filter, encode based on CFilters map
-filterTileCs :: CFilters -> BL.ByteString -> Either T.Text BL.ByteString
+filterTileCs :: CFilters -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
 filterTileCs cstyles dta =
     second doFilterTile (tile (cs (decompress dta)))
   where
-    doFilterTile = compressWith compressParams . cs . untile . filterVectorTile cstyles
+    doFilterTile tl = compressWith compressParams . cs . untile <$> filterVectorTile cstyles tl
     -- | Default compression settings
     compressParams = defaultCompressParams{compressLevel=bestCompression}
 
 -- | Decode, filter, encode based on zoom level and mapbox style
-filterTile :: Int -> MapboxStyle -> BL.ByteString -> Either T.Text BL.ByteString
+filterTile :: Int -> MapboxStyle -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
 filterTile z style = filterTileCs (styleToCFilters z style)
 
