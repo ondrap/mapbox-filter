@@ -213,7 +213,7 @@ genMetadata modTimeStr urlPrefix = do
     metalines <- getMetaData
     return $ AE.object $
         concatMap addMetaLine metalines
-        ++ ["tiles" .= [urlPrefix <> "/tiles/" <> "/{z}/{x}/{y}?" <> modTimeStr],
+        ++ ["tiles" .= [urlPrefix <> "/tiles/{z}/{x}/{y}?" <> modTimeStr],
             "tilejson" .= ("2.0.0" :: T.Text)
             ]
   where
@@ -276,12 +276,11 @@ runFilterJob pool mstyle saveAction = do
     liftIO $ putStrLn ("Total tiles in the file " <> show total_count <> " tiles")
     counter <- liftIO CNT.new
     emptycnt <- liftIO CNT.new
-    -- Take it from tiles directly, we will have more zoom levels but so what
-    zlevels <- getZooms
+    zlevels <- getIncompleteZooms
     race_ (showStats total_count counter emptycnt) $
       for_ zlevels $ \zoom -> do
         liftIO $ putStrLn $ "Filtering zoom: " <> show zoom
-        cols <- getZoomColumns zoom
+        cols <- getJobZoomColumns zoom
         liftWithPool 2 $ \colPool -> -- Do some low limit for columns
           parallelFor_ colPool cols $ \col -> do
             tiles <- getColTiles zoom col
@@ -363,8 +362,7 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
       runFilterJob pool (fst <$> mstyle) $ \((z,x,y,_), mnewdta) ->
         -- Skip empty tiles
         liftIO $ for_ mnewdta $ \(TileData newdta) -> do
-          let xyz_y = toXyzY y z
-              dstpath = "tiles/" <> show z <> "/" <> show x <> "/" <> show xyz_y
+          let dstpath = "tiles/" <> mkPath (z,x,y)
           case pStoreTgt of
             PublishFs root -> do
               let fpath = root </> dstpath
@@ -386,6 +384,9 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
           runResourceT $ runAWS env $
             void (send cmd)
   where
+    mkPath (z'@(Zoom z), Column x, tms_y) =
+      let (XyzRow xyz_y) = toXyzY tms_y z'
+      in show z <> "/" <> show x <> "/" <> show xyz_y
     withThreads
       | Just tcount <- pThreads = withPool tcount
       | otherwise = bracket (return globalPool) (const stopGlobalPool)

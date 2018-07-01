@@ -106,11 +106,6 @@ getTotalCount = do
   [Only total_count] <- mbQuery_ "select count(*) from tiles"
   return total_count
 
-getZoomColumns :: (Monad m, HasMbConn m) => Zoom -> m [Column]
-getZoomColumns z = do
-  let colquery = "select distinct tile_column from job where zoom_level=? order by tile_column"
-  fmap fromOnly <$> mbQuery colquery (Only z)
-
 getColTiles :: (Monad m, HasMbConn m) => Zoom -> Column -> m [(Zoom, Column, TmsRow, TileId)]
 getColTiles z x = do
   let qry = "select zoom_level,tile_column,tile_row,tile_id from map where zoom_level=? AND tile_column=?"
@@ -130,7 +125,13 @@ class Monad m => WriteMbTile m where
   updateMbtile :: (Zoom, Column, TmsRow, TileId) -> Maybe TileData -> m ()
   vacuumDb :: m ()
 
+
 -- Automatic instance for incremental jobs when db is available
+getJobZoomColumns :: (Monad m, HasJobConn m) => Zoom -> m [Column]
+getJobZoomColumns z = do
+  let colquery = "select distinct tile_column from jobs where zoom_level=? order by tile_column"
+  fmap fromOnly <$> jobQuery colquery (Only z)
+
 getIncompleteZooms :: (Monad m, HasJobConn m) => m [Zoom]
 getIncompleteZooms = fmap fromOnly <$> jobQuery_ "select distinct zoom_level from jobs order by zoom_level"
 
@@ -173,10 +174,10 @@ checkJobDb jobconn mbconn forceFull = do
         execute_ jobconn "drop table errors" `catchAny` \_ -> return ()
         execute_ jobconn "create table jobs (zoom_level int, tile_column int)"
         execute_ jobconn "create INDEX jobs_index ON jobs (zoom_level,tile_column)"
-        execute_ jobconn "create table errors (zoom_level int, tile_column int, tile_row int, )"
+        execute_ jobconn "create table errors (zoom_level int, tile_column int, tile_row int, tile_id text)"
         putStrLn "Doing full database work, recreating job list"
         jobs :: [(Zoom, Column)] <- query_ mbconn "select distinct zoom_level, tile_column from map"
-        executeMany jobconn "insert into jobs(zomm_level,tile_column) values (?,?)" jobs
+        executeMany jobconn "insert into jobs(zoom_level,tile_column) values (?,?)" jobs
         putStrLn "Job list done"
   where
     tableExists conn table =
