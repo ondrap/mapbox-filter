@@ -10,39 +10,37 @@ module Main where
 import           Codec.Compression.GZip               (decompress)
 import           Control.Concurrent                   (getNumCapabilities,
                                                        threadDelay)
-import           Control.Concurrent.Async             (race_)
 import           Control.Concurrent.ParallelIO.Global (globalPool,
                                                        stopGlobalPool)
 import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
                                                        withPool)
-import           Control.Exception.Safe               (bracket, catchAny)
+import           Control.Exception.Safe               (bracket)
 import           Control.Lens                         (over, (%~), (&), (.~),
                                                        (<&>), (?~), (^.), (^..),
                                                        (^?), _Just)
-import           Control.Monad                        (forever, void, when)
+import           Control.Monad                        (forever, void)
+import           Control.Monad.Fail                   (MonadFail (..))
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
 import qualified Data.Aeson                           as AE
-import           Data.Bifunctor                       (second)
 import           Data.Bool                            (bool)
 import qualified Data.ByteString                      as BS
 import qualified Data.ByteString.Lazy                 as BL
 import           Data.Foldable                        (for_)
 import qualified Data.HashMap.Strict                  as HMap
-import           Data.Int                             (Int64)
 import           Data.List                            (nub)
 import           Data.List.NonEmpty                   (NonEmpty, nonEmpty)
 import           Data.Maybe                           (fromMaybe)
+import qualified Data.Pool                            as DP
 import           Data.Semigroup                       (sconcat, (<>))
 import           Data.String.Conversions              (cs)
 import qualified Data.Text                            as T
 import qualified Data.Text.IO                         as T
 import qualified Data.Text.Lazy                       as TL
 import           Data.Traversable                     (for)
-import           Database.SQLite.Simple               (Connection, Only (..),
-                                                       Query (..), execute,
-                                                       execute_, query, query_,
+import           Database.SQLite.Simple               (Only (..), query_,
                                                        withConnection)
+import qualified Database.SQLite.Simple               as SQL
 import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
                                                        polygons, tile)
@@ -69,10 +67,13 @@ import           System.Posix.Files                   (getFileStatus,
                                                        modificationTime)
 import           System.Posix.Types                   (EpochTime)
 import           Text.Read                            (readMaybe)
+import           UnliftIO                             (MonadUnliftIO, catchAny,
+                                                       race_, withRunInIO)
 import           Web.Scotty                           (addHeader, get, header,
                                                        json, param, raise, raw,
                                                        scotty, setHeader)
 
+import           DbAccess
 import           Mapbox.Filters
 import           Mapbox.Interpret                     (FeatureType (..),
                                                        runFilter)
@@ -110,7 +111,6 @@ data CmdLine =
       fModStyles  :: [FilePath]
     , fSourceName :: Maybe T.Text
     , fWebPort    :: Int
-    , fLazyUpdate :: Bool
     , fMbtiles    :: FilePath
   }
   | CmdPublish {
@@ -142,7 +142,6 @@ webOptions =
   CmdWebServer <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
               <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
               <*> option auto (short 'p' <> long "port" <> help "Web port number")
-              <*> switch (short 'l' <> long "lazy" <> help "Lazily update the database with filtered data")
               <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
 
@@ -209,12 +208,12 @@ checkStyle mtilesrc dbmaxzoom styl = do
                 & over (msLayers . traverse . _VectorType . lMinZoom . _Just) (min dbmaxzoom)
 
 -- | Generate metadata json based on modification text + database + other info
-genMetadata :: Connection -> TL.Text -> TL.Text -> IO AE.Value
-genMetadata conn modTimeStr urlPrefix = do
-    metalines :: [(T.Text,String)] <- query_ conn "select name,value from metadata"
+genMetadata :: (Monad m, HasMbConn m) => TL.Text -> TL.Text -> m AE.Value
+genMetadata modTimeStr urlPrefix = do
+    metalines <- getMetaData
     return $ AE.object $
         concatMap addMetaLine metalines
-        ++ ["tiles" .= [urlPrefix <> "/tiles/" <> modTimeStr <> "/{z}/{x}/{y}"],
+        ++ ["tiles" .= [urlPrefix <> "/tiles/" <> "/{z}/{x}/{y}?" <> modTimeStr],
             "tilejson" .= ("2.0.0" :: T.Text)
             ]
   where
@@ -263,49 +262,51 @@ dumpPbf style zoom fp = do
       let include = runFilter lfilter ptype feature
       putStrLn $ bool "- " "  " include <> show ptype <> " " <> show (feature ^. metadata)
 
-type JobAction = ((Int, Int, Int, T.Text), Maybe BL.ByteString) -> IO ()
+type JobAction m = ((Zoom, Column, TmsRow, TileId), Maybe TileData) -> m ()
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
 runFilterJob ::
-     T.Text  -- ^ Table name that contains columns that should be processed
-  -> Pool -- ^ Threadpool for parallel processing
-  -> Connection -- ^ Sqlite DB pool connection
+    forall m. (HasMbConn m, HasJobConn m, MonadUnliftIO m, MonadFail m)
+  => Pool -- ^ Threadpool for parallel processing
   -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
-  -> JobAction -- ^ Action to perform on filtered tile
-  -> ((Int, Int) -> IO ()) -- ^ Action to perform when a tile_row is completed
-  -> ((Int,Int,Int,T.Text) -> IO ()) -- ^ Error handler
-  -> IO ()
-runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
-    [Only (total_count :: Int64)] <- query_ conn (Query ("select count(*) from " <> table))
-    putStrLn ("Need to process " <> show total_count <> " tiles")
-    counter <- CNT.new
-    emptycnt <- CNT.new
+  -> JobAction m -- ^ Action to perform on filtered tile
+  -> m ()
+runFilterJob pool mstyle saveAction = do
+    total_count <- getTotalCount
+    liftIO $ putStrLn ("Total tiles in the file " <> show total_count <> " tiles")
+    counter <- liftIO CNT.new
+    emptycnt <- liftIO CNT.new
     -- Take it from tiles directly, we will have more zoom levels but so what
-    zlevels <- query_ conn (Query "select distinct zoom_level from tiles order by zoom_level")
+    zlevels <- getZooms
     race_ (showStats total_count counter emptycnt) $
-      for_ zlevels $ \(Only zoom) -> do
-        putStrLn $ "Filtering zoom: " <> show zoom
-        -- There can be huge amount of tiles, so do it in parallel, column by column
-        let colquery = Query ("select distinct tile_column from " <> table <> " where zoom_level=? order by tile_column")
-        cols :: [Only Int] <- query conn colquery (Only zoom)
-        withPool 2 $ \colPool -> -- Do some low limit for columns
-          parallelFor_ colPool cols $ \(Only col) -> do
-            let qry = "select zoom_level,tile_column,tile_row,tile_id from map where zoom_level=? AND tile_column=?"
-            (tiles :: [(Int,Int,Int,T.Text)]) <- query conn qry (zoom, col)
-            let iaction = maybe (saveAction . second Just)
-                                (\st -> shrinkTile emptycnt (styleToCFilters zoom st))
-                                mstyle
-            parallelFor_  pool tiles $ \tid ->
-                (fetchTile tid >>= iaction >> CNT.inc counter)
-                  `catchAny` \err -> do
-                      putStrLn ("Error on " <> show tid <> ": " <> show err)
-                      errHandler tid
-            rowComplete (zoom, col)
+      for_ zlevels $ \zoom -> do
+        liftIO $ putStrLn $ "Filtering zoom: " <> show zoom
+        cols <- getZoomColumns zoom
+        liftWithPool 2 $ \colPool -> -- Do some low limit for columns
+          parallelFor_ colPool cols $ \col -> do
+            tiles <- getColTiles zoom col
+            parallelFor_  pool tiles $ \tid@(z@(Zoom z'),x,y,tileid) ->
+              (do
+                  liftIO $ CNT.inc counter
+                  -- We assume the tile exists in the db...
+                  Just tiledta <- fetchTileTid tileid
+                  case mstyle of
+                      Nothing    -> saveAction ((z,x,y,tileid), Just tiledta)
+                      Just style -> shrinkTile emptycnt (styleToCFilters z' style) ((z,x,y,tileid), tiledta)
+                ) `catchAny` \err -> do
+                      liftIO $ putStrLn ("Error on " <> show tid <> ": " <> show err)
+                      markErrorTile tid
+            markColumnComplete zoom col
   where
-    parallelFor_ pool_ parlist job = parallel_ pool_ (job <$> parlist)
+    liftWithPool n f =
+      withRunInIO $ \runInIO ->
+        withPool n $ \dbpool -> runInIO (f dbpool)
+    parallelFor_ pool_ parlist job =
+      withRunInIO $ \runInIO ->
+        (parallel_ pool_) (runInIO . job <$> parlist)
 
     showStats total_count counter emptycnt =
-      forever $ do
+      liftIO $ forever $ do
         let delay = 15
         start <- CNT.read counter
         threadDelay (delay * 1000000)
@@ -319,67 +320,22 @@ runFilterJob table pool conn mstyle saveAction rowComplete errHandler = do
                   <> " deleted: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral emptyc / fromIntegral end)
                   <> "%"
 
-    fetchTile tid@(_,_,_,ttid) = do
-      let q = Query "select tile_data from images where tile_id=?"
-      [Only (tdata :: BL.ByteString)] <- query conn q (Only ttid)
-      return (tid, tdata)
-
-    shrinkTile emptycnt filtList (tid, tdata) =
+    shrinkTile emptycnt filtList (tid, TileData tdata) =
       case filterTileCs filtList tdata of
-        Left err -> putStrLn $ "Error when decoding tile " <> show tid <> ": " <> cs err
+        Left err -> liftIO $ putStrLn $ "Error when decoding tile " <> show tid <> ": " <> cs err
         Right newdta -> do
           -- Update empty counter
-          maybe (CNT.inc emptycnt) (\_ -> return ()) newdta
+          liftIO $ maybe (CNT.inc emptycnt) (\_ -> return ()) newdta
           -- Call job action
-          saveAction (tid, newdta)
-
-runIncrFilterJob ::
-     T.Text -- ^ Table name for handling incremental data
-  -> Pool -- ^ Threadpool for parallel processing
-  -> Connection -- ^ Connection to sqlite db
-  -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
-  -> Bool -- ^ Force a full upload (reset saved information)
-  -> JobAction -- ^ Action to perform on filtered tile
-  -> IO ()
-runIncrFilterJob table pool conn mstyle forceFull saveAction = do
-    createTable
-    runFilterJob ("e_" <> table) pool conn mstyle (\t@((z,x,y,_),_) -> saveAction t >> removeError (z,x,y)) (const (return ())) (const (return ()))
-    runFilterJob table pool conn mstyle saveAction rowComplete addToErrTable
-  where
-    addToErrTable (z,x,y,_) = execute conn (Query ("insert into e_" <> table <> " (zoom_level,tile_column,tile_row) values (?,?,?)")) (z, x, y)
-    removeError (z,x,y) = execute conn (Query ("delete from e_" <> table <> " where zoom_level=? AND tile_column=? AND tile_row=?")) (z, x, y)
-    rowComplete (z,x) = execute conn (Query ("delete from " <> table <> " where zoom_level=? AND tile_column=?")) (z, x)
-
-    -- Return true if the working table exists
-    tableExists =
-      (void (query_ @(Only Int) conn (Query ("select count(*) from " <> table))) >> return True)
-        `catchAny` \_ -> return False
-    createTable = do
-      exists <- tableExists
-      if | not exists || forceFull -> do
-            execute_ conn (Query ("drop table " <> table)) `catchAny` \_ -> return ()
-            execute_ conn (Query ("drop table e_" <> table)) `catchAny` \_ -> return ()
-            execute_ conn (Query ("create table " <> table <> " as select distinct zoom_level,tile_column from tiles"))
-            execute_ conn (Query ("create INDEX "<> table <> "_index ON " <> table <> " (zoom_level,tile_column)"))
-            execute_ conn (Query ("create table e_" <> table <> " (zoom_level int, tile_column int, tile_row int)"))
-            putStrLn "Doing full database work"
-         | otherwise ->
-            putStrLn "Doing incremental work"
+          saveAction (tid, TileData <$> newdta)
 
 -- | Filter all tiles in a database and save the filtered tiles back
 convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()
 convertMbtiles style mbtiles force = do
-  withConnection mbtiles $ \conn -> do
-    runIncrFilterJob "shrink_queue" globalPool conn (Just style) force $ \((z,x,y,_), mnewdta) -> do
-      let q = Query "select tile_id from map where zoom_level=? and tile_column=? and tile_row=?"
-      [Only (tileid :: T.Text)] <- query conn q (z,x,y)
-      case mnewdta of
-        Just newdta -> execute conn "update images set tile_data=? where tile_id=?" (newdta, tileid)
-        Nothing -> do
-          execute conn "delete from map where zoom_level=? AND tile_column=? AND tile_row=?" (z,x,y)
-          execute conn "delete from images where tile_id=?" (Only tileid)
+  runSingleDb force mbtiles (mbtiles <> ".filter") $ do
+    runFilterJob globalPool (Just style) (uncurry updateMbtile)
     -- If we were shrinking, call vacuum on database
-    execute_ conn "vacuum"
+    vacuumDb
   stopGlobalPool
 
 -- | Publish the mbtile to an S3 target, make it ready for serving
@@ -399,14 +355,16 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
         <&> maybe id (\host -> configure (setEndpoint True host 443 s3)) pS3Endpoint
         <&> envManager .~ manager
 
+  dbpool <- DP.createPool (SQL.open pMbtiles) SQL.close 1 100 conncount
+  modstr <- runMb dbpool $ makeModtimeStr (snd <$> mstyle)
+
   withThreads $ \pool ->
-    withConnection pMbtiles $ \conn -> do
-      modstr <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-      runIncrFilterJob ("upload_" <> cs modstr) pool conn (fst <$> mstyle) pForceFull $ \((z,x,y,_), mnewdta) ->
+    runParallelDb pForceFull dbpool (pMbtiles <> "." <> modstr) $ do
+      runFilterJob pool (fst <$> mstyle) $ \((z,x,y,_), mnewdta) ->
         -- Skip empty tiles
-        for_ mnewdta $ \newdta -> do
-          let xyz_y = yzFlipTms y z
-              dstpath = "tiles/" <> modstr <> "/" <> show z <> "/" <> show x <> "/" <> show xyz_y
+        liftIO $ for_ mnewdta $ \(TileData newdta) -> do
+          let xyz_y = toXyzY y z
+              dstpath = "tiles/" <> show z <> "/" <> show x <> "/" <> show xyz_y
           case pStoreTgt of
             PublishFs root -> do
               let fpath = root </> dstpath
@@ -419,9 +377,9 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
                           & poContentEncoding ?~ "gzip"
                           & poCacheControl ?~ "max-age=31536000"
                 void $ send cmd
-      meta <- genMetadata conn (cs modstr) (cs pUrlPrefix)
+      meta <- genMetadata (cs modstr) (cs pUrlPrefix)
       case pStoreTgt of
-        PublishFs root -> BL.writeFile (root </> "metadata.json") (AE.encode meta)
+        PublishFs root -> liftIO $ BL.writeFile (root </> "metadata.json") (AE.encode meta)
         PublishS3 bucket -> do
           let cmd = putObject bucket "metadata.json" (toBody (AE.encode meta))
                     & poContentType ?~ "application/json"
@@ -432,90 +390,55 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
       | Just tcount <- pThreads = withPool tcount
       | otherwise = bracket (return globalPool) (const stopGlobalPool)
 
--- | Flip y coordinate between xyz and tms schemes
-yzFlipTms :: Int -> Int -> Int
-yzFlipTms y z = 2 ^ z - y - 1
-
 -- | Make a string containing modification time of db & style
-makeModtimeStr :: Connection -> Maybe EpochTime -> IO String
-makeModtimeStr conn mtime = do
-    dbmtime <- liftIO getDbMtime
+makeModtimeStr :: (Monad m, HasMbConn m) => Maybe EpochTime -> m String
+makeModtimeStr mtime = do
+    dbmtime <- getDbMtime
     let stmtime = fromMaybe 0 mtime
     return (dbmtime <> "_" <> show stmtime)
-  where
-    getDbMtime = do
-      mlines :: [Only String] <- query_ conn "select value from metadata where name='mtime'"
-      case mlines of
-        [Only res] -> return res
-        _          -> return ""
 
 -- | Run a web server serving filtered/unfiltered tiles and metadata
-runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> Bool -> IO ()
-runWebServer port mstyle mbpath lazyUpdate =
-  withConnection mbpath $ \conn -> do
-    -- If lazy, add a column to a table
-    when lazyUpdate $
-      execute_ conn "alter table images add column shrinked default 0"
-        `catchAny` \_ -> return ()
-    -- Generate a JSON to be included as a metadata file
-    -- Run a web server
-    scotty port $ do
-      get "/tiles/metadata.json" $ do
-          -- find out protocol and host
-          proto <- fromMaybe "http" <$> header "X-Forwarded-Proto"
-          host <- fromMaybe "localhost" <$> header "Host"
-          mtime <- liftIO $ makeModtimeStr conn (snd <$> mstyle)
-          metaJson <- liftIO $ genMetadata conn (cs mtime) (proto <> "://" <> host)
-          addHeader "Access-Control-Allow-Origin" "*"
-          json metaJson
-      get "/tiles/:mt1/:z/:x/:y" $ do
-          z <- param "z"
-          x :: Int <- param "x"
-          y <- param "y"
-          let tms_y = yzFlipTms y z
+runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> IO ()
+runWebServer port mstyle mbpath = do
+  dbpool <- DP.createPool (SQL.open mbpath) SQL.close 1 100 100
 
-          mnewtile <- case (mstyle, lazyUpdate) of
-              (Just (style,_), True) -> getLazyTile conn style z x tms_y
-              _                      -> getTile conn z x tms_y
+  -- Generate a JSON to be included as a metadata file
+  -- Run a web server
+  scotty port $ do
+    get "/tiles/metadata.json" $ do
+        -- find out protocol and host
+        proto <- fromMaybe "http" <$> header "X-Forwarded-Proto"
+        host <- fromMaybe "localhost" <$> header "Host"
+        metaJson <- liftIO $ runMb dbpool $ do
+            mtime <- makeModtimeStr (snd <$> mstyle)
+            genMetadata (cs mtime) (proto <> "://" <> host)
+        addHeader "Access-Control-Allow-Origin" "*"
+        json metaJson
+    get "/tiles/:mt1/:z/:x/:y" $ do
+        z@(Zoom z') <- param "z"
+        x <- param "x"
+        y <- param "y"
+        let tms_y = toTmsY y z
 
-          addHeader "Access-Control-Allow-Origin" "*"
-          setHeader "Content-Type" "application/x-protobuf"
-          setHeader "Cache-Control" "max-age=31536000"
+        addHeader "Access-Control-Allow-Origin" "*"
+        setHeader "Content-Type" "application/x-protobuf"
+        setHeader "Cache-Control" "max-age=31536000"
 
-          case mnewtile of
-            Just dta -> do
-              addHeader "Content-Encoding" "gzip"
-              raw dta
-            Nothing -> raw "" -- Empty tile
-  where
-    -- Get tile from modified database; if not already shrinked, shrink it and write to the database
-    getLazyTile conn style z x tms_y = do
-      rows <- liftIO $ query conn "select tile_data, map.tile_id, shrinked from images,map where zoom_level=? AND tile_column=? AND tile_row=? AND map.tile_id=images.tile_id"
-                (z, x, tms_y)
-      case rows of
-        [(dta, _, 1 :: Int)] -> return (Just dta)
-        [(dta, tileid :: T.Text, _)] ->
-            case filterTile z style dta of
-              Left err -> raise (cs err)
-              Right newdta -> do
-                liftIO $ execute conn "update images set tile_data=?,shrinked=1 where tile_id=?"
-                              (newdta, tileid)
-                return newdta
-        _ -> return Nothing
-
-    -- Ordinarily get tile from database; if styling enabled, do the styling
-    getTile conn z x tms_y = do
-      rows <- liftIO $ query conn "select tile_data from tiles where zoom_level=? AND tile_column=? AND tile_row=?"
-                      (z, x, tms_y)
-      case rows of
-        [Only dta] ->
-          case mstyle of
-            Nothing -> return (Just dta)
-            Just (style,_) ->
-              case filterTile z style dta of
-                Left err     -> raise (cs err)
-                Right newdta -> return newdta
-        _ -> return Nothing
+        rnewtile <- liftIO $ runMb dbpool $ fetchTileZXY (z, x, tms_y)
+        mnewtile <- case rnewtile of
+            Just (TileData dta) ->
+              case mstyle of
+                Nothing -> return (Just dta)
+                Just (style,_) ->
+                  case filterTile z' style dta of
+                    Left err     -> raise (cs err)
+                    Right newdta -> return newdta
+            _ -> return Nothing
+        case mnewtile of
+          Just dta -> do
+            addHeader "Content-Encoding" "gzip"
+            raw dta
+          Nothing -> raw "" -- Empty tile
 
 main :: IO ()
 main = do
@@ -528,10 +451,10 @@ main = do
         maxzoom <- getMaxZoom fMbtiles
         style <- getStyle fStyles >>= checkStyle fSourceName maxzoom
         convertMbtiles style fMbtiles fForceFull
-    CmdWebServer{fModStyles, fWebPort, fMbtiles, fLazyUpdate, fSourceName} -> do
+    CmdWebServer{fModStyles, fWebPort, fMbtiles, fSourceName} -> do
         maxzoom <- getMaxZoom fMbtiles
         mstyle <- getMStyle fModStyles fSourceName maxzoom
-        runWebServer fWebPort mstyle fMbtiles fLazyUpdate
+        runWebServer fWebPort mstyle fMbtiles
     CmdPublish{fModStyles, fSourceName, fPublishOpts} -> do
         maxzoom <- getMaxZoom (pMbtiles fPublishOpts)
         mstyle <- getMStyle fModStyles fSourceName maxzoom

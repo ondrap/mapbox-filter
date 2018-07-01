@@ -47,6 +47,7 @@ library
 
 executable mapbox-filter
   main-is: Main.hs
+  other-modules: DbAccess
   hs-source-dirs:
       app
   ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
@@ -77,4 +78,7 @@ executable mapbox-filter
     , http-client-tls
     , filepath
     , directory
+    , resource-pool
+    , mtl
+    , unliftio
   default-language: Haskell2010
