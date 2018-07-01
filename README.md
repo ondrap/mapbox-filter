@@ -21,9 +21,8 @@ be displayed. Then it removes metadata that is not used in the styles. The remov
 process is currently somewhat crude (it retains all metadata used at the particular layer),
 but it should be enough for most usecases.
 
-Currently only the openmaptiles.org mbtile files are supported for `filter` command.
-The `publish` and `web` command in non-lazy mode should be compatibile with
-any mbtile file.
+Currently only the openmaptiles.org mbtile files are supported for `filter` and `publish` commands.
+The `web` command should be compatibile with any mbtile file.
 
 ## How to compile
 
@@ -57,12 +56,6 @@ $ mapbox-filter web -p 3000 cz.mbtiles
 Serve the mbtiles file while doing online filtering according to the mapboxstyle.json file.
 ```
 $ mapbox-filter web -p 3000 -j mapboxstyle.json cz.mbtiles
-```
-
-Serve the mbtiles file, do online filtering on not-yet-filtered tiles, save the filtered tiles back
-to the database.
-```
-$ mapbox-filter web -p 3000 -j mapboxstyle.json -l cz.mbtiles
 ```
 
 Publish filtered mbtiles to S3. Higher parallelism might be desirable, use the `-p`
