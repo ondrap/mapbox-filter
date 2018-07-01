@@ -18,7 +18,7 @@ import           Control.Exception.Safe               (bracket)
 import           Control.Lens                         (over, (%~), (&), (.~),
                                                        (<&>), (?~), (^.), (^..),
                                                        (^?), _Just)
-import           Control.Monad                        (forever, void)
+import           Control.Monad                        (forever, unless, void)
 import           Control.Monad.Fail                   (MonadFail (..))
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
@@ -277,6 +277,16 @@ runFilterJob pool mstyle saveAction = do
     counter <- liftIO CNT.new
     emptycnt <- liftIO CNT.new
     zlevels <- getIncompleteZooms
+
+    errors <- getErrorTiles
+    unless (null errors) $ do
+      liftIO $ putStrLn ("Processing error tiles: " <> show (length errors))
+      for_ errors $ \tileArg@(z,x,y,_) ->
+        (do
+          processTile counter emptycnt tileArg
+          clearErrorTile (z,x,y)
+          ) `catchAny` \err -> liftIO $ putStrLn ("Tile " <> show tileArg <> " error: " <> show err)
+
     race_ (showStats total_count counter emptycnt) $
       for_ zlevels $ \zoom -> do
         liftIO $ putStrLn $ "Filtering zoom: " <> show zoom
@@ -284,19 +294,21 @@ runFilterJob pool mstyle saveAction = do
         liftWithPool 2 $ \colPool -> -- Do some low limit for columns
           parallelFor_ colPool cols $ \col -> do
             tiles <- getColTiles zoom col
-            parallelFor_  pool tiles $ \tid@(z@(Zoom z'),x,y,tileid) ->
-              (do
-                  liftIO $ CNT.inc counter
-                  -- We assume the tile exists in the db...
-                  Just tiledta <- fetchTileTid tileid
-                  case mstyle of
-                      Nothing    -> saveAction ((z,x,y,tileid), Just tiledta)
-                      Just style -> shrinkTile emptycnt (styleToCFilters z' style) ((z,x,y,tileid), tiledta)
-                ) `catchAny` \err -> do
-                      liftIO $ putStrLn ("Error on " <> show tid <> ": " <> show err)
-                      markErrorTile tid
+            parallelFor_  pool tiles $ \tileArg ->
+              processTile counter emptycnt tileArg
+                `catchAny` \err -> do
+                    liftIO $ putStrLn ("Error on " <> show tileArg <> ": " <> show err)
+                    markErrorTile tileArg
             markColumnComplete zoom col
   where
+    processTile counter emptycnt (z@(Zoom z'),x,y,tileid) = do
+      liftIO $ CNT.inc counter
+      -- We assume the tile exists in the db...
+      Just tiledta <- fetchTileTid tileid
+      case mstyle of
+          Nothing    -> saveAction ((z,x,y,tileid), Just tiledta)
+          Just style -> shrinkTile emptycnt (styleToCFilters z' style) ((z,x,y,tileid), tiledta)
+
     liftWithPool n f =
       withRunInIO $ \runInIO ->
         withPool n $ \dbpool -> runInIO (f dbpool)
