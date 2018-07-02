@@ -24,9 +24,9 @@ import           Database.SQLite.Simple           (Connection, Only (..),
                                                    executeMany, execute_, query,
                                                    query_, withConnection)
 import           Database.SQLite.Simple.FromField (FromField (..))
-import           Database.SQLite.Simple.FromRow   (FromRow)
-import           Database.SQLite.Simple.ToField   (ToField)
-import           Database.SQLite.Simple.ToRow     (ToRow)
+import           Database.SQLite.Simple.FromRow   (FromRow (..))
+import           Database.SQLite.Simple.ToField   (ToField (..))
+import           Database.SQLite.Simple.ToRow     (ToRow (..))
 import           UnliftIO                         (MonadUnliftIO (..),
                                                    UnliftIO (..), withUnliftIO)
 import           Web.Scotty                       (Parsable)
@@ -166,6 +166,12 @@ newtype SingleDbRunner a = SingleDbRunner {
   } deriving (Functor, Applicative, Monad, MonadIO, MonadThrow)
 deriving instance MonadReader SingleEnv SingleDbRunner
 
+data StrictRowDesc = StrictRowDesc !Zoom !Column
+instance ToRow StrictRowDesc where
+  toRow (StrictRowDesc z x) = [toField z, toField x]
+instance FromRow StrictRowDesc where
+  fromRow = uncurry StrictRowDesc <$> fromRow
+
 checkJobDb :: Connection -> Connection -> Bool -> IO ()
 checkJobDb jobconn mbconn forceFull = do
   exists <- tableExists jobconn "jobs"
@@ -176,7 +182,7 @@ checkJobDb jobconn mbconn forceFull = do
         execute_ jobconn "create INDEX jobs_index ON jobs (zoom_level,tile_column)"
         execute_ jobconn "create table errors (zoom_level int, tile_column int, tile_row int, tile_id text)"
         putStrLn "Doing full database work, recreating job list"
-        jobs :: [(Zoom, Column)] <- query_ mbconn "select distinct zoom_level, tile_column from map"
+        jobs :: [StrictRowDesc] <- query_ mbconn "select distinct zoom_level, tile_column from map"
         executeMany jobconn "insert into jobs(zoom_level,tile_column) values (?,?)" jobs
         putStrLn "Job list done"
   where
