@@ -18,7 +18,8 @@ import           Control.Exception.Safe               (bracket)
 import           Control.Lens                         (over, (%~), (&), (.~),
                                                        (<&>), (?~), (^.), (^..),
                                                        (^?), _Just)
-import           Control.Monad                        (forever, unless, void)
+import           Control.Monad                        (forever, unless, void,
+                                                       when)
 import           Control.Monad.Fail                   (MonadFail (..))
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
@@ -52,6 +53,7 @@ import           Network.AWS                          (AccessKey (..), Credentia
                                                        setEndpoint, toBody)
 import           Network.AWS.S3                       (BucketName (..),
                                                        ObjectKey (..),
+                                                       deleteObject,
                                                        poCacheControl,
                                                        poContentEncoding,
                                                        poContentType, putObject,
@@ -60,7 +62,9 @@ import           Network.HTTP.Client                  (managerConnCount, manager
                                                        newManager)
 import           Network.HTTP.Client.TLS              (tlsManagerSettings)
 import           Options.Applicative                  hiding (header, style)
-import           System.Directory                     (createDirectoryIfMissing)
+import           System.Directory                     (createDirectoryIfMissing,
+                                                       doesFileExist,
+                                                       removeFile)
 import           System.FilePath.Posix                (takeDirectory, (</>))
 import qualified System.Metrics.Counter               as CNT
 import           System.Posix.Files                   (getFileStatus,
@@ -80,7 +84,7 @@ import           Mapbox.Interpret                     (FeatureType (..),
 import           Mapbox.Style                         (MapboxStyle, lMinZoom,
                                                        lSource, msLayers,
                                                        _VectorType)
-
+import           Types
 
 data PublishTarget = PublishFs FilePath | PublishS3 BucketName
   deriving (Show)
@@ -266,7 +270,7 @@ type JobAction m = ((Zoom, Column, TmsRow, TileId), Maybe TileData) -> m ()
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
 runFilterJob ::
-    forall m. (HasMbConn m, HasJobConn m, MonadUnliftIO m, MonadFail m)
+    forall m. (HasMbConn m, HasJobConn m, MonadUnliftIO m, MonadFail m, HasMd5Queue m)
   => Pool -- ^ Threadpool for parallel processing
   -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
   -> JobAction m -- ^ Action to perform on filtered tile
@@ -274,8 +278,9 @@ runFilterJob ::
 runFilterJob pool mstyle saveAction = do
     total_count <- getTotalCount
     liftIO $ putStrLn ("Total tiles in the file " <> show total_count <> " tiles")
-    counter <- liftIO CNT.new
+    counter <- liftIO CNT.new -- TODO - take complete count from the job file...
     emptycnt <- liftIO CNT.new
+    changecnt <- liftIO CNT.new
     zlevels <- getIncompleteZooms
 
     errors <- getErrorTiles
@@ -283,11 +288,11 @@ runFilterJob pool mstyle saveAction = do
       liftIO $ putStrLn ("Processing error tiles: " <> show (length errors))
       for_ errors $ \tileArg@(z,x,y,_) ->
         (do
-          processTile counter emptycnt tileArg
+          processTile counter emptycnt changecnt tileArg
           clearErrorTile (z,x,y)
           ) `catchAny` \err -> liftIO $ putStrLn ("Tile " <> show tileArg <> " error: " <> show err)
 
-    race_ (showStats total_count counter emptycnt) $
+    race_ (showStats total_count counter emptycnt changecnt) $
       for_ zlevels $ \zoom -> do
         liftIO $ putStrLn $ "Filtering zoom: " <> show zoom
         cols <- getJobZoomColumns zoom
@@ -295,19 +300,31 @@ runFilterJob pool mstyle saveAction = do
           parallelFor_ colPool cols $ \col -> do
             tiles <- getColTiles zoom col
             parallelFor_  pool tiles $ \tileArg ->
-              processTile counter emptycnt tileArg
+              processTile counter emptycnt changecnt tileArg
                 `catchAny` \err -> do
                     liftIO $ putStrLn ("Error on " <> show tileArg <> ": " <> show err)
                     markErrorTile tileArg
             markColumnComplete zoom col
   where
-    processTile counter emptycnt (z@(Zoom z'),x,y,tileid) = do
+    processTile counter emptycnt changecnt pos@(z@(Zoom z'),x,y,tileid) = do
       liftIO $ CNT.inc counter
       -- We assume the tile exists in the db...
       Just tiledta <- fetchTileTid tileid
-      case mstyle of
-          Nothing    -> saveAction ((z,x,y,tileid), Just tiledta)
-          Just style -> shrinkTile emptycnt (styleToCFilters z' style) ((z,x,y,tileid), tiledta)
+      let tres = case mstyle of
+            Nothing -> Right (Just tiledta)
+            Just style ->
+              let filtList = styleToCFilters z' style
+              in fmap TileData <$> filterTileCs filtList (unTileData tiledta)
+      case tres of
+        Left _ -> return ()
+        Right newdta -> do
+          liftIO $ for_ newdta (const $ CNT.inc emptycnt)
+          -- Check changes
+          changed <- checkHashChanged (z,x,toXyzY y z) newdta
+          when changed $ do
+            -- Call job action
+            saveAction (pos, newdta)
+            liftIO $ CNT.inc changecnt
 
     liftWithPool n f =
       withRunInIO $ \runInIO ->
@@ -316,29 +333,20 @@ runFilterJob pool mstyle saveAction = do
       withRunInIO $ \runInIO ->
         (parallel_ pool_) (runInIO . job <$> parlist)
 
-    showStats total_count counter emptycnt =
+    showStats total_count counter emptycnt changecnt =
       liftIO $ forever $ do
         let delay = 15
         start <- CNT.read counter
         threadDelay (delay * 1000000)
         end <- CNT.read counter
-        -- TODO: We should read the system time... but the numbers are not that important
         emptyc <- CNT.read emptycnt
+        changec <- CNT.read changecnt
         let percent = round ((100 :: Double) * fromIntegral end / fromIntegral total_count) :: Int
             speed = round (fromIntegral (end - start) / (fromIntegral delay :: Double)) :: Int
         putStrLn $ "Completion status: " <> show percent
                   <> "%, speed: " <> show speed <> " tiles/sec"
                   <> " deleted: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral emptyc / fromIntegral end)
-                  <> "%"
-
-    shrinkTile emptycnt filtList (tid, TileData tdata) =
-      case filterTileCs filtList tdata of
-        Left err -> liftIO $ putStrLn $ "Error when decoding tile " <> show tid <> ": " <> cs err
-        Right newdta -> do
-          -- Update empty counter
-          liftIO $ maybe (CNT.inc emptycnt) (\_ -> return ()) newdta
-          -- Call job action
-          saveAction (tid, TileData <$> newdta)
+                  <> "%, written: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral changec / fromIntegral end)
 
 -- | Filter all tiles in a database and save the filtered tiles back
 convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()
@@ -369,24 +377,37 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
   dbpool <- DP.createPool (SQL.open pMbtiles) SQL.close 1 100 conncount
   modstr <- runMb dbpool $ makeModtimeStr (snd <$> mstyle)
 
-  withThreads $ \pool ->
-    runParallelDb pForceFull dbpool (pMbtiles <> "." <> modstr) $ do
+  withThreads $ \pool -> do
+    let hashfile = pMbtiles <> ".hashes"
+    runParallelDb pForceFull dbpool (pMbtiles <> "." <> modstr) hashfile $ do
       runFilterJob pool (fst <$> mstyle) $ \((z,x,y,_), mnewdta) ->
-        -- Skip empty tiles
-        liftIO $ for_ mnewdta $ \(TileData newdta) -> do
+        liftIO $ do
           let dstpath = "tiles/" <> mkPath (z,x,y)
-          case pStoreTgt of
-            PublishFs root -> do
-              let fpath = root </> dstpath
-              createDirectoryIfMissing True (takeDirectory fpath)
-              BL.writeFile fpath newdta
-            PublishS3 bucket ->
-              runResourceT $ runAWS env $ do
-                let cmd = putObject bucket (ObjectKey (cs dstpath)) (toBody newdta)
-                          & poContentType ?~ "application/x-protobuf"
-                          & poContentEncoding ?~ "gzip"
-                          & poCacheControl ?~ "max-age=31536000"
-                void $ send cmd
+          -- Skip empty tiles
+          case mnewdta of
+            Nothing ->
+              case pStoreTgt of
+                PublishFs root -> do
+                  let fpath = root </> dstpath
+                  exists <- doesFileExist fpath
+                  when exists (removeFile fpath)
+                PublishS3 bucket ->
+                  runResourceT (runAWS env $
+                      void $ send (deleteObject bucket (ObjectKey (cs dstpath)))
+                    ) `catchAny` \e -> liftIO (print e)
+            Just (TileData newdta) ->
+              case pStoreTgt of
+                PublishFs root -> do
+                  let fpath = root </> dstpath
+                  createDirectoryIfMissing True (takeDirectory fpath)
+                  BL.writeFile fpath newdta
+                PublishS3 bucket ->
+                  runResourceT $ runAWS env $ do
+                    let cmd = putObject bucket (ObjectKey (cs dstpath)) (toBody newdta)
+                              & poContentType ?~ "application/x-protobuf"
+                              & poContentEncoding ?~ "gzip"
+                              & poCacheControl ?~ "max-age=31536000"
+                    void $ send cmd
       meta <- genMetadata (cs modstr) (cs pUrlPrefix)
       case pStoreTgt of
         PublishFs root -> liftIO $ BL.writeFile (root </> "metadata.json") (AE.encode meta)
@@ -395,6 +416,7 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
                     & poContentType ?~ "application/json"
           runResourceT $ runAWS env $
             void (send cmd)
+    -- TODO - publish hashfile...?
   where
     mkPath (z'@(Zoom z), Column x, tms_y) =
       let (XyzRow xyz_y) = toXyzY tms_y z'

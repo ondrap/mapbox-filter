@@ -8,50 +8,27 @@
 
 module DbAccess where
 
-import           Control.Exception.Safe           (MonadThrow, catchAny,
-                                                   throwIO)
-import           Control.Monad                    (void, when)
-import           Control.Monad.Fail               (MonadFail (..))
-import           Control.Monad.IO.Class           (MonadIO, liftIO)
-import           Control.Monad.Reader             (MonadReader, ReaderT (..),
-                                                   ask, asks, runReaderT)
-import qualified Data.ByteString.Lazy             as BL
-import           Data.Monoid                      ((<>))
-import qualified Data.Pool                        as DP
-import qualified Data.Text                        as T
-import           Database.SQLite.Simple           (Connection, Only (..),
-                                                   Query (..), execute,
-                                                   executeMany, execute_, query,
-                                                   query_, withConnection)
-import           Database.SQLite.Simple.FromField (FromField (..))
-import           Database.SQLite.Simple.FromRow   (FromRow (..))
-import           Database.SQLite.Simple.ToField   (ToField (..))
-import           Database.SQLite.Simple.ToRow     (ToRow (..))
-import           UnliftIO                         (MonadUnliftIO (..),
-                                                   UnliftIO (..), withUnliftIO)
-import           Web.Scotty                       (Parsable)
+import           Control.Exception.Safe         (MonadThrow, catchAny, throwIO)
+import           Control.Monad                  (void, when)
+import           Control.Monad.Fail             (MonadFail (..))
+import           Control.Monad.IO.Class         (MonadIO, liftIO)
+import           Control.Monad.Reader           (MonadReader, ReaderT (..), ask,
+                                                 asks, runReaderT)
+import           Data.Monoid                    ((<>))
+import qualified Data.Pool                      as DP
+import qualified Data.Text                      as T
+import           Database.SQLite.Simple         (Connection, Only (..),
+                                                 Query (..), execute,
+                                                 executeMany, execute_, query,
+                                                 query_, withConnection)
+import           Database.SQLite.Simple.FromRow (FromRow (..))
+import           Database.SQLite.Simple.ToField (ToField (..))
+import           Database.SQLite.Simple.ToRow   (ToRow (..))
+import           UnliftIO                       (MonadUnliftIO (..),
+                                                 UnliftIO (..), withUnliftIO)
 
-newtype TileId = TileId T.Text
-  deriving (Show, ToField, FromField)
-
-newtype TileData = TileData BL.ByteString
-  deriving (Show, ToField, FromField)
-
-newtype Zoom = Zoom Int
-  deriving (Show, ToField, FromField, Parsable)
-newtype XyzRow = XyzRow Int
-  deriving (Show, ToField, Parsable)
-newtype TmsRow = TmsRow Int
-  deriving (Show, ToField, FromField)
-newtype Column = Column Int
-  deriving (Show, ToField, FromField, Parsable)
-
--- | Flip y coordinate between xyz and tms schemes
-toTmsY :: XyzRow -> Zoom -> TmsRow
-toTmsY (XyzRow y) (Zoom z) = TmsRow (2 ^ z - y - 1)
-
-toXyzY :: TmsRow -> Zoom -> XyzRow
-toXyzY (TmsRow y) (Zoom z) = XyzRow (2 ^ z - y - 1)
+import           Md5Worker
+import           Types
 
 class MonadIO m => HasMbConn m where
   {-# MINIMAL withMbConn #-}
@@ -81,6 +58,11 @@ class MonadIO m => HasJobConn m where
     conn <- getJobConn
     liftIO $ execute conn q p
 
+
+class MonadIO m => HasMd5Queue m where
+  -- | Return true if there is a change and the tile should be published/saved/etc.
+  checkHashChanged :: (Zoom, Column, XyzRow) -> Maybe TileData -> m Bool
+  addHash :: (Zoom, Column, XyzRow) -> Maybe TileData -> m ()
 
 fetchTileTid :: (Monad m, HasMbConn m) => TileId -> m (Maybe TileData)
 fetchTileTid tid = do
@@ -172,6 +154,10 @@ instance ToRow StrictRowDesc where
 instance FromRow StrictRowDesc where
   fromRow = uncurry StrictRowDesc <$> fromRow
 
+instance HasMd5Queue SingleDbRunner where
+  checkHashChanged _ _ = return True
+  addHash _ _ = return ()
+
 checkJobDb :: Connection -> Connection -> Bool -> IO ()
 checkJobDb jobconn mbconn forceFull = do
   exists <- tableExists jobconn "jobs"
@@ -257,8 +243,9 @@ runMb :: Monad m => DP.Pool Connection -> MbRunner m a -> m a
 runMb pool (MbRunner code) = runReaderT code pool
 
 data ParallelEnv = ParallelEnv {
-    peMbPool  :: DP.Pool Connection
-  , peJobConn :: Connection
+    peMbPool   :: DP.Pool Connection
+  , peJobConn  :: Connection
+  , peMd5Queue :: Md5Queue
 }
 
 newtype ParallelDbRunner a = ParallelDbRunner {
@@ -288,8 +275,20 @@ instance HasMbConn ParallelDbRunner where
 instance HasJobConn ParallelDbRunner where
   getJobConn = asks peJobConn
 
-runParallelDb :: Bool -> DP.Pool Connection -> FilePath -> ParallelDbRunner a -> IO a
-runParallelDb forceFull mbpool jobpath (ParallelDbRunner code) =
+instance HasMd5Queue ParallelDbRunner where
+  checkHashChanged param tile = do
+    q <- asks peMd5Queue
+    liftIO $ tileChanged q param tile
+  addHash param tile = do
+    q <- asks peMd5Queue
+    liftIO $ sendMd5Tile q param tile
+
+runParallelDb :: Bool -> DP.Pool Connection -> FilePath -> FilePath -> ParallelDbRunner a -> IO a
+runParallelDb forceFull mbpool jobpath md5path (ParallelDbRunner code) =
   withConnection jobpath $ \jobconn -> do
     DP.withResource mbpool $ \conn -> checkJobDb jobconn conn forceFull
-    runReaderT code (ParallelEnv mbpool jobconn)
+    md5queue <- runQueueThread md5path
+    res <- runReaderT code (ParallelEnv mbpool jobconn md5queue)
+    stopMd5Queue md5queue
+    return res
+
