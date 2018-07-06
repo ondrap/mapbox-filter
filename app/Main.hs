@@ -325,6 +325,7 @@ runFilterJob pool mstyle saveAction = do
             -- Call job action
             saveAction (pos, newdta)
             liftIO $ CNT.inc changecnt
+          addHash (z,x,toXyzY y z) newdta
 
     liftWithPool n f =
       withRunInIO $ \runInIO ->
@@ -347,6 +348,7 @@ runFilterJob pool mstyle saveAction = do
                   <> "%, speed: " <> show speed <> " tiles/sec"
                   <> " deleted: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral emptyc / fromIntegral end)
                   <> "%, written: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral changec / fromIntegral end)
+                  <> "%"
 
 -- | Filter all tiles in a database and save the filtered tiles back
 convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()

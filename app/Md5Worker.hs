@@ -36,7 +36,6 @@ data Md5Message =
 data Md5Queue = Md5Queue {
     md5Q         :: BoundedChan Md5Message
   , md5DbOld     :: Maybe (DP.Pool Connection)
-  , md5WasEmpty  :: Bool
   , md5DbName    :: FilePath
   , md5NewDbName :: FilePath
 }
@@ -60,17 +59,12 @@ stopMd5Queue queue = do
   renameFile (md5NewDbName queue) (md5DbName queue)
 
 tileChanged :: Md5Queue -> (Zoom, Column, XyzRow) -> Maybe TileData -> IO Bool
-tileChanged Md5Queue{md5WasEmpty=True} _ (Just _) = return True
-tileChanged Md5Queue{md5WasEmpty=True} _ Nothing = return False
 tileChanged Md5Queue{md5DbOld=Nothing} _ _ = return True
 tileChanged Md5Queue{md5DbOld=Just dbpool} (z,x,y) mtile =
   DP.withResource dbpool $ \conn -> do
     res <- query conn "select md5_hash from md5hash where zoom_level=? and tile_column=? and tile_row=?" (z,x,y)
     let mhash = (\(TileData dta) -> hashlazy dta) <$> mtile
-    case (listToMaybe (fromOnly <$> res), mhash) of
-      (Just dbhash, Just hash) -> return (dbhash /= hash)
-      (Nothing, Nothing)       -> return False
-      _                        -> return True
+    return (mhash /= listToMaybe (fromOnly <$> res))
 
 runQueueThread :: FilePath -> Int -> IO Md5Queue
 runQueueThread dbpath thrcount = do
@@ -82,9 +76,9 @@ runQueueThread dbpath thrcount = do
 
     let newdbpath = dbpath ++ ".new"
     conn <- SQL.open newdbpath
-    wasEmpty <- initDb conn
+    initDb conn
     _ <- forkIO (handleConn queue conn)
-    return (Md5Queue queue dbpool wasEmpty dbpath newdbpath)
+    return (Md5Queue queue dbpool dbpath newdbpath)
   where
     handleConn q conn = do
       msg <- readChan q
@@ -93,15 +87,16 @@ runQueueThread dbpath thrcount = do
             -- Close db for access
             SQL.close conn
             signal
-        Md5AddFile (z,x,y) md5 -> do
-          let maybeMd5 = ST.maybe Nothing Just md5
-          SQL.execute conn "insert into md5hash (zoom_level,tile_column,tile_row,md5_hash) values (?,?,?,?)" (z, x, y, maybeMd5)
+        Md5AddFile (z,x,y) (ST.Just md5) -> do
+          SQL.execute conn "delete from md5hash (zoom_level,tile_column,tile_row) values (?,?,?)" (z, x, y)
+            `catchAny` \_ -> return ()
+          SQL.execute conn "insert into md5hash (zoom_level,tile_column,tile_row,md5_hash) values (?,?,?,?)" (z, x, y, md5)
           handleConn q conn
+        Md5AddFile _ ST.Nothing -> handleConn q conn
       -- Initialize db, return true if it was empty
-    initDb :: Connection -> IO Bool
+    initDb :: Connection -> IO ()
     initDb conn =
       (do
-         SQL.execute_ conn "create table md5hash (zoom_level int not null, tile_column int not null, tile_row int not null, md5_hash text)"
+         SQL.execute_ conn "create table md5hash (zoom_level int not null, tile_column int not null, tile_row int not null, md5_hash blob not null)"
          SQL.execute_ conn "create index md5hash_index on md5hash (zoom_level, tile_column, tile_row)"
-         return True
-      )`catchAny` \_ -> return False
+      )`catchAny` \_ -> return ()
