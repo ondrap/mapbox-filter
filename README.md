@@ -10,7 +10,7 @@ parser for the Mapbox GL JS style and an executable that can:
   * serving the real-time filtered tiles
   * after serving a tile saving the compressed tile back to the database (Openmaptiles database only is currently supported in this mode)
 - Publish tiles to S3 so that you don't need to run a webserver at all. As this can
-  take a very long time, incremental and parallel upload is supported.
+  take a very long time, incremental, differential and parallel upload is supported.
 
 This library supports only a subset of the expression language (https://www.mapbox.com/mapbox-gl-js/style-spec/#expressions-types).
 It's because I don't need that and most of the language isn't going to be used in the filter expression anyway. If you need
@@ -66,6 +66,22 @@ $ mapbox-filter publish
   -u https://s3.eu-central-1.amazonaws.com/my-test-bucket/styled-map
   -t s3://my-test-bucket/styled-map -p 10 cz.mbtiles
 ```
+
+## Incremental job
+
+Unless given the `-f` option, the filtering/publishing remembers roughly the last position
+and when restarted, the job starts from the last position. The information is retained in a file
+`<name>.mbtiles.SOME_NUMBERS`. When the mbtile file is replaced or the style is changed,
+the `SOME_NUMBERS` change and a new full job is forced.
+
+## Differential upload
+
+The S3 is billed by a access request; in order to minimize access costs, the program
+automatically creates a file `<name>.mbtile.hashes`. When the publishing is complete, copy
+the file manually to S3 to have the information available later. 
+Upon next job restart (regardless if with or without the `-f` option),
+if the file `name.mbtiles.hashes` exists, only the changed tiles will be uploaded or deleted. 
+This should minimize costs upon country updates, when only a minority of the tiles is changed.
 
 ## What next
 

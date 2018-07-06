@@ -59,7 +59,8 @@ stopMd5Queue queue = do
   renameFile (md5NewDbName queue) (md5DbName queue)
 
 tileChanged :: Md5Queue -> (Zoom, Column, XyzRow) -> Maybe TileData -> IO Bool
-tileChanged Md5Queue{md5DbOld=Nothing} _ _ = return True
+tileChanged Md5Queue{md5DbOld=Nothing} _ (Just _) = return True
+tileChanged Md5Queue{md5DbOld=Nothing} _ Nothing = return False
 tileChanged Md5Queue{md5DbOld=Just dbpool} (z,x,y) mtile =
   DP.withResource dbpool $ \conn -> do
     res <- query conn "select md5_hash from md5hash where zoom_level=? and tile_column=? and tile_row=?" (z,x,y)
