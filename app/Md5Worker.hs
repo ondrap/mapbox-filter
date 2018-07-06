@@ -68,7 +68,7 @@ tileChanged Md5Queue{md5DbOld=Just dbpool} (z,x,y) mtile =
 
 runQueueThread :: FilePath -> Int -> IO Md5Queue
 runQueueThread dbpath thrcount = do
-    queue <- newBoundedChan 200
+    queue <- newBoundedChan 400
     oldexists <- doesFileExist dbpath
     dbpool <- if oldexists
               then Just <$> DP.createPool (SQL.open dbpath) SQL.close 1 100 thrcount
@@ -88,9 +88,7 @@ runQueueThread dbpath thrcount = do
             SQL.close conn
             signal
         Md5AddFile (z,x,y) (ST.Just md5) -> do
-          SQL.execute conn "delete from md5hash (zoom_level,tile_column,tile_row) values (?,?,?)" (z, x, y)
-            `catchAny` \_ -> return ()
-          SQL.execute conn "insert into md5hash (zoom_level,tile_column,tile_row,md5_hash) values (?,?,?,?)" (z, x, y, md5)
+          SQL.execute conn "insert or replace into md5hash (zoom_level,tile_column,tile_row,md5_hash) values (?,?,?,?)" (z, x, y, md5)
           handleConn q conn
         Md5AddFile _ ST.Nothing -> handleConn q conn
       -- Initialize db, return true if it was empty

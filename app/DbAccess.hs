@@ -125,10 +125,8 @@ markColumnComplete :: (Monad m, HasJobConn m) => Zoom -> Column -> m ()
 markColumnComplete z x = jobExecute "delete from jobs where zoom_level=? and tile_column=?" (z,x)
 
 markErrorTile :: (Monad m, HasJobConn m) => (Zoom, Column, TmsRow, TileId) -> m ()
-markErrorTile (z,x,y, tid) = do
-  -- Just for sure, delete
-  jobExecute "delete from errors where zoom_level=? and tile_column=? and tile_row=?" (z,x,y)
-  jobExecute "insert into errors (zoom_level,tile_column,tile_row, tile_id) values (?,?,?,?)" (z,x,y, tid)
+markErrorTile (z,x,y, tid) =
+  jobExecute "insert or replace into errors (zoom_level,tile_column,tile_row, tile_id) values (?,?,?,?)" (z,x,y, tid)
 
 getErrorTiles :: (Monad m, HasJobConn m) => m [(Zoom, Column, TmsRow, TileId)]
 getErrorTiles = jobQuery_ "select zoom_level,tile_column,tile_row, tile_id from errors"
