@@ -276,8 +276,8 @@ runFilterJob ::
   -> JobAction m -- ^ Action to perform on filtered tile
   -> m ()
 runFilterJob pool mstyle saveAction = do
-    total_count <- getTotalCount
-    liftIO $ putStrLn ("Total tiles in the file " <> show total_count <> " tiles")
+    total_count <- getIncompleteCount
+    liftIO $ putStrLn ("Remaining tiles: " <> show total_count)
     counter <- liftIO CNT.new -- TODO - take complete count from the job file...
     emptycnt <- liftIO CNT.new
     changecnt <- liftIO CNT.new

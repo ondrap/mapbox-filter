@@ -121,6 +121,11 @@ getIncompleteColumns :: (Monad m, HasJobConn m) => Zoom -> m [Column]
 getIncompleteColumns z =
   fmap fromOnly <$> jobQuery "select tile_column from jobs where zoom_level=?" (Only z)
 
+getIncompleteCount ::  (Monad m, HasJobConn m, MonadFail m) => m Int
+getIncompleteCount = do
+  [Only res] <- jobQuery_ "select sum(tile_count) from jobs"
+  return res
+
 markColumnComplete :: (Monad m, HasJobConn m) => Zoom -> Column -> m ()
 markColumnComplete z x = jobExecute "delete from jobs where zoom_level=? and tile_column=?" (z,x)
 
@@ -146,11 +151,11 @@ newtype SingleDbRunner a = SingleDbRunner {
   } deriving (Functor, Applicative, Monad, MonadIO, MonadThrow)
 deriving instance MonadReader SingleEnv SingleDbRunner
 
-data StrictRowDesc = StrictRowDesc !Zoom !Column
+data StrictRowDesc = StrictRowDesc !Zoom !Column !Int
 instance ToRow StrictRowDesc where
-  toRow (StrictRowDesc z x) = [toField z, toField x]
+  toRow (StrictRowDesc z x c) = [toField z, toField x, toField c]
 instance FromRow StrictRowDesc where
-  fromRow = uncurry StrictRowDesc <$> fromRow
+  fromRow = (\(a, b, c) -> StrictRowDesc a b c) <$> fromRow
 
 instance HasMd5Queue SingleDbRunner where
   checkHashChanged _ _ = return True
@@ -162,12 +167,12 @@ checkJobDb jobconn mbconn forceFull = do
   when (not exists || forceFull) $  do
         execute_ jobconn "drop table jobs" `catchAny` \_ -> return ()
         execute_ jobconn "drop table errors" `catchAny` \_ -> return ()
-        execute_ jobconn "create table jobs (zoom_level int, tile_column int)"
+        execute_ jobconn "create table jobs (zoom_level int not null, tile_column int not null, tile_count int not null)"
         execute_ jobconn "create INDEX jobs_index ON jobs (zoom_level,tile_column)"
         execute_ jobconn "create table errors (zoom_level int, tile_column int, tile_row int, tile_id text)"
         putStrLn "Doing full database work, recreating job list"
-        jobs :: [StrictRowDesc] <- query_ mbconn "select distinct zoom_level, tile_column from map"
-        executeMany jobconn "insert into jobs(zoom_level,tile_column) values (?,?)" jobs
+        jobs :: [StrictRowDesc] <- query_ mbconn "select zoom_level, tile_column, count(*) from map group by zoom_level, tile_column"
+        executeMany jobconn "insert into jobs(zoom_level,tile_column, tile_count) values (?,?,?)" jobs
         putStrLn "Job list done"
   where
     tableExists conn table =
