@@ -379,7 +379,7 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
 
   withThreads $ \pool -> do
     let hashfile = pMbtiles <> ".hashes"
-    runParallelDb pForceFull dbpool (pMbtiles <> "." <> modstr) hashfile $ do
+    runParallelDb pForceFull conncount dbpool (pMbtiles <> "." <> modstr) hashfile $ do
       runFilterJob pool (fst <$> mstyle) $ \((z,x,y,_), mnewdta) ->
         liftIO $ do
           let dstpath = "tiles/" <> mkPath (z,x,y)

@@ -283,12 +283,11 @@ instance HasMd5Queue ParallelDbRunner where
     q <- asks peMd5Queue
     liftIO $ sendMd5Tile q param tile
 
-runParallelDb :: Bool -> DP.Pool Connection -> FilePath -> FilePath -> ParallelDbRunner a -> IO a
-runParallelDb forceFull mbpool jobpath md5path (ParallelDbRunner code) =
+runParallelDb :: Bool -> Int -> DP.Pool Connection -> FilePath -> FilePath -> ParallelDbRunner a -> IO a
+runParallelDb forceFull conncount mbpool jobpath md5path (ParallelDbRunner code) =
   withConnection jobpath $ \jobconn -> do
     DP.withResource mbpool $ \conn -> checkJobDb jobconn conn forceFull
-    md5queue <- runQueueThread md5path
+    md5queue <- runQueueThread md5path conncount
     res <- runReaderT code (ParallelEnv mbpool jobconn md5queue)
     stopMd5Queue md5queue
     return res
-
