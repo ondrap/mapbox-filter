@@ -14,6 +14,7 @@ import           Control.Monad.Fail             (MonadFail (..))
 import           Control.Monad.IO.Class         (MonadIO, liftIO)
 import           Control.Monad.Reader           (MonadReader, ReaderT (..), ask,
                                                  asks, runReaderT)
+import           Data.Maybe                     (fromMaybe)
 import           Data.Monoid                    ((<>))
 import qualified Data.Pool                      as DP
 import qualified Data.Text                      as T
@@ -124,7 +125,7 @@ getIncompleteColumns z =
 getIncompleteCount ::  (Monad m, HasJobConn m, MonadFail m) => m Int
 getIncompleteCount = do
   [Only res] <- jobQuery_ "select sum(tile_count) from jobs"
-  return res
+  return $ fromMaybe 0 res
 
 markColumnComplete :: (Monad m, HasJobConn m) => Zoom -> Column -> m ()
 markColumnComplete z x = jobExecute "delete from jobs where zoom_level=? and tile_column=?" (z,x)
@@ -282,7 +283,8 @@ instance HasMd5Queue ParallelDbRunner where
   checkHashChanged param tile = do
     q <- asks peMd5Queue
     liftIO $ tileChanged q param tile
-  addHash param tile = do
+  addHash _ Nothing = return ()
+  addHash param (Just tile) = do
     q <- asks peMd5Queue
     liftIO $ sendMd5Tile q param tile
 

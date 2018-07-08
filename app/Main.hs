@@ -14,7 +14,7 @@ import           Control.Concurrent.ParallelIO.Global (globalPool,
                                                        stopGlobalPool)
 import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
                                                        withPool)
-import           Control.Exception.Safe               (bracket)
+import           Control.Exception.Safe               (bracket, throwIO)
 import           Control.Lens                         (over, (%~), (&), (.~),
                                                        (<&>), (?~), (^.), (^..),
                                                        (^?), _Just)
@@ -316,9 +316,9 @@ runFilterJob pool mstyle saveAction = do
               let filtList = styleToCFilters z' style
               in fmap TileData <$> filterTileCs filtList (unTileData tiledta)
       case tres of
-        Left _ -> return ()
+        Left err -> liftIO $ throwIO (userError (show err))
         Right newdta -> do
-          liftIO $ for_ newdta (const $ CNT.inc emptycnt)
+          liftIO $ whenNothing newdta (CNT.inc emptycnt)
           -- Check changes
           changed <- checkHashChanged (z,x,toXyzY y z) newdta
           when changed $ do
@@ -333,6 +333,9 @@ runFilterJob pool mstyle saveAction = do
     parallelFor_ pool_ parlist job =
       withRunInIO $ \runInIO ->
         (parallel_ pool_) (runInIO . job <$> parlist)
+
+    whenNothing Nothing f = f
+    whenNothing _ _       = return ()
 
     showStats total_count counter emptycnt changecnt =
       liftIO $ forever $ do

@@ -20,7 +20,6 @@ import           Crypto.Hash.MD5                (hashlazy)
 import qualified Data.ByteString                as BS
 import           Data.Maybe                     (listToMaybe)
 import qualified Data.Pool                      as DP
-import qualified Data.Strict.Maybe              as ST
 import           Database.SQLite.Simple         (Connection, Only (..), query)
 import qualified Database.SQLite.Simple         as SQL
 import           System.Directory               (doesFileExist, removeFile,
@@ -30,7 +29,7 @@ import           Types                          (Column (..), TileData (..),
                                                  XyzRow (..), Zoom (..))
 
 data Md5Message =
-    Md5AddFile (Zoom, Column, XyzRow) !(ST.Maybe BS.ByteString)
+    Md5AddFile (Zoom, Column, XyzRow) !BS.ByteString
   | Md5Exit (IO ())
 
 data Md5Queue = Md5Queue {
@@ -40,13 +39,10 @@ data Md5Queue = Md5Queue {
   , md5NewDbName :: FilePath
 }
 
-sendMd5Tile :: Md5Queue -> (Zoom, Column, XyzRow) -> Maybe TileData -> IO ()
+sendMd5Tile :: Md5Queue -> (Zoom, Column, XyzRow) -> TileData -> IO ()
 sendMd5Tile queue pos mtdata = do
-  let md5 = hashlazy . unTileData <$> mtdata
-  writeChan (md5Q queue) $! Md5AddFile pos (toStrict md5)
-  where
-    toStrict Nothing  = ST.Nothing
-    toStrict (Just a) = ST.Just a
+  let md5 = hashlazy . unTileData $ mtdata
+  writeChan (md5Q queue) $! Md5AddFile pos md5
 
 stopMd5Queue :: Md5Queue -> IO ()
 stopMd5Queue queue = do
@@ -88,10 +84,9 @@ runQueueThread dbpath thrcount = do
             -- Close db for access
             SQL.close conn
             signal
-        Md5AddFile (z,x,y) (ST.Just md5) -> do
+        Md5AddFile (z,x,y) md5 -> do
           SQL.execute conn "insert or replace into md5hash (zoom_level,tile_column,tile_row,md5_hash) values (?,?,?,?)" (z, x, y, md5)
           handleConn q conn
-        Md5AddFile _ ST.Nothing -> handleConn q conn
       -- Initialize db, return true if it was empty
     initDb :: Connection -> IO ()
     initDb conn =

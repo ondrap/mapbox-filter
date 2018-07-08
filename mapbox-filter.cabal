@@ -83,5 +83,4 @@ executable mapbox-filter
     , unliftio
     , cryptohash-md5
     , BoundedChan
-    , strict
   default-language: Haskell2010
