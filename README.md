@@ -83,7 +83,37 @@ Upon next job restart (regardless if with or without the `-f` option),
 if the file `name.mbtiles.hashes` exists, only the changed tiles will be uploaded or deleted. 
 This should minimize costs upon country updates, when only a minority of the tiles is changed.
 
+## Performance considerations
+
+### Parallelism and RTS tuning
+
+The `filter` and `publish` commands by default use as many cores as is available on the computer.
+However, sometimes this does not lead to better performance. You can limit the number of cores
+with a special RTS (runtime system) command `-N`. It might be also beneficial to tune garbage 
+collector with the `-A` parameter; you may need to experiment with the settings.
+
+When publishing directly to S3, the bottleneck is usually the network; in such case it may be
+better to use higher parallelism to achieve higher throughput. The following command
+will use 16 cores, 80 parallel threads and has an allocation unit set to 1 megabyte:
+
+```
+$ mapbox-filter publish -j openmaptiles.json.js -u https://xxx.cloudfront.net/w -t s3://my-map-bucket/w osm-planet.mbtiles -p80 +RTS -N16 -A1m
+```
+
+### MD5 database tuning
+
+When publishing the data, a new database of md5 hashes is automatically created to aid with
+differential uploads. Unfortunately, the access to the database is serialized. Therefore,
+it might be best to run the job in ramdisk. On Linux, this would mean changing directory
+somewhere to `tmpfs`, e.g. `/dev/shm`. Create a symlink to the original `mbtiles` file
+(e.g. `/dev/shm/world.mbtiles`) and then run the command in the `/dev/shm` directory.
+The md5 database will be created on a ramdisk.
+
+Alternatively, SSD disk or some enterprise storage system with write cache
+might be fast enough with more assurance in case of power loss. 
+
 ## What next
 
 This started as a way to learn typechecking in Haskell and how to make a typed AST using GADTs.
 It took about 1 day to make it work and it practically worked on the first try. Haskell is impressive.
+Obviously since the first day a lot of functionality and better performance was added.
