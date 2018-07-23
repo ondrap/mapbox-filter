@@ -462,7 +462,7 @@ runWebServer port mstyle rtlconvert mbpath = do
             genMetadata (cs mtime) (proto <> "://" <> host)
         addHeader "Access-Control-Allow-Origin" "*"
         json metaJson
-    get "/tiles/:mt1/:z/:x/:y" $ do
+    get "/tiles/:z/:x/:y" $ do
         z@(Zoom z') <- param "z"
         x <- param "x"
         y <- param "y"
