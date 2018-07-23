@@ -36,6 +36,7 @@ library
     , string-conversions
     , zlib
     , recursion-schemes
+    , text-icu
   exposed-modules:
       Mapbox.Expression
       Mapbox.Style

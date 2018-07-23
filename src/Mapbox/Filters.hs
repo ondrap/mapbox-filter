@@ -1,4 +1,5 @@
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | Helper module for
 module Mapbox.Filters where
@@ -21,7 +22,9 @@ import qualified Data.Text                 as T
 import qualified Data.Vector               as V
 import           Geography.VectorTile      (Feature, Layer, VectorTile, layers,
                                             linestrings, metadata, name, points,
-                                            polygons, tile, untile)
+                                            polygons, tile, untile, Val(St))
+import Data.Text.ICU.Shape (shapeArabic, ShapeOption(..))
+import Data.Text.ICU.BiDi (reorderParagraphs, WriteOption(..))
 
 import           Mapbox.Interpret          (CompiledExpr, FeatureType (..),
                                             runFilter)
@@ -46,8 +49,8 @@ getLayerFilter lname layerFilters =
 
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
 -- Returns nothing if the resulting tile is empty
-filterVectorTile :: CFilters -> VectorTile -> Maybe VectorTile
-filterVectorTile layerFilters =
+filterVectorTile :: Bool -> CFilters -> VectorTile -> Maybe VectorTile
+filterVectorTile rtlconvert layerFilters =
     checkEmptyTile . over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
   where
     -- Return nothing if there are no layers (and therefore no features) on the tile
@@ -65,8 +68,22 @@ filterVectorTile layerFilters =
            & over linestrings (fmap (clearMeta lfilter) . V.filter (runFilter (cfExpr lfilter) LineString))
            & over polygons (fmap (clearMeta lfilter) . V.filter (runFilter (cfExpr lfilter) Polygon))
 
-clearMeta :: CFilter ->  Feature a -> Feature a
-clearMeta cf = over metadata (HMap.filterWithKey (\k _ -> k `elem` cfMeta cf))
+    clearMeta :: CFilter -> Feature a -> Feature a
+    clearMeta cf = over metadata (fmap stringConversion . HMap.filterWithKey (\k _ -> k `elem` cfMeta cf))
+
+    stringConversion :: Val -> Val
+    stringConversion | rtlconvert = valRtlConvert
+                     | otherwise = id
+      where
+        valRtlConvert (St bstr) = 
+          bstr & cs
+              & shapeArabic [LettersShape]
+              & reorderParagraphs [DoMirroring, RemoveBidiControls]
+              & T.intercalate "\n"
+              & cs
+              & St
+        valRtlConvert v = v
+
 
 -- | Convert style and zoom level to a map of (source_layer, filter)
 styleToCFilters :: Int -> MapboxStyle -> CFilters
@@ -94,15 +111,15 @@ styleToCFilters zoom =
     zoomMaxOk (Just maxz) = zoom <= maxz
 
 -- | Decode, filter, encode based on CFilters map
-filterTileCs :: CFilters -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
-filterTileCs cstyles dta =
+filterTileCs :: Bool -> CFilters -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
+filterTileCs rtlconvert cstyles dta =
     second doFilterTile (tile (cs (decompress dta)))
   where
-    doFilterTile tl = compressWith compressParams . cs . untile <$> filterVectorTile cstyles tl
+    doFilterTile tl = compressWith compressParams . cs . untile <$> filterVectorTile rtlconvert cstyles tl
     -- | Default compression settings
     compressParams = defaultCompressParams{compressLevel=bestCompression}
 
 -- | Decode, filter, encode based on zoom level and mapbox style
-filterTile :: Int -> MapboxStyle -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
-filterTile z style = filterTileCs (styleToCFilters z style)
+filterTile :: Bool -> Int -> MapboxStyle -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
+filterTile rtlconvert z style = filterTileCs rtlconvert (styleToCFilters z style)
 

@@ -107,18 +107,21 @@ data CmdLine =
   }
   | CmdMbtiles {
       fStyles     :: NonEmpty FilePath
+    , fRtlConvert :: Bool
     , fSourceName :: Maybe T.Text
     , fForceFull  :: Bool
     , fMbtiles    :: FilePath
   }
   | CmdWebServer {
       fModStyles  :: [FilePath]
+    , fRtlConvert :: Bool
     , fSourceName :: Maybe T.Text
     , fWebPort    :: Int
     , fMbtiles    :: FilePath
   }
   | CmdPublish {
       fModStyles   :: [FilePath]
+    , fRtlConvert :: Bool
     , fSourceName  :: Maybe T.Text
     , fPublishOpts :: PublishOpts
   }
@@ -137,6 +140,7 @@ dumpOptions =
 mbtileOptions :: Parser CmdLine
 mbtileOptions =
   CmdMbtiles <$> nsome (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+            <*> switch (long "rtl-convert" <> help "Apply Right-to-left text conversion on metadata (Arabic etc.)")
             <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
             <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
             <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
@@ -144,6 +148,7 @@ mbtileOptions =
 webOptions :: Parser CmdLine
 webOptions =
   CmdWebServer <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+              <*> switch (long "rtl-convert" <> help "Apply Right-to-left text conversion on metadata (Arabic etc.)")
               <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
               <*> option auto (short 'p' <> long "port" <> help "Web port number")
               <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
@@ -161,7 +166,8 @@ publishOptions :: Parser CmdLine
 publishOptions =
   CmdPublish
     <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
-    <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
+    <*> switch (long "rtl-convert" <> help "Apply Right-to-left text conversion on metadata (Arabic etc.)")
+    <*> optional (strOption (short 's' <> long "source" <> help "Tile source name from mapbox style"))
     <*> (PublishOpts <$>
          (stripRightSlash <$> strOption (short 'u' <> long "url-prefix" <> help "External tile URL prefix"))
       <*> option s3Bucket (short 't' <> long "target" <> help "S3 target prefix for files (e.g. s3://my-bucket/map) or filesystem path")
@@ -273,9 +279,10 @@ runFilterJob ::
     forall m. (HasMbConn m, HasJobConn m, MonadUnliftIO m, MonadFail m, HasMd5Queue m)
   => Pool -- ^ Threadpool for parallel processing
   -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
+  -> Bool -- ^ If true, convert right-to-left texts
   -> JobAction m -- ^ Action to perform on filtered tile
   -> m ()
-runFilterJob pool mstyle saveAction = do
+runFilterJob pool mstyle rtlconvert saveAction = do
     total_count <- getIncompleteCount
     liftIO $ putStrLn ("Remaining tiles: " <> show total_count)
     counter <- liftIO CNT.new -- TODO - take complete count from the job file...
@@ -314,7 +321,7 @@ runFilterJob pool mstyle saveAction = do
             Nothing -> Right (Just tiledta)
             Just style ->
               let filtList = styleToCFilters z' style
-              in fmap TileData <$> filterTileCs filtList (unTileData tiledta)
+              in fmap TileData <$> filterTileCs rtlconvert filtList (unTileData tiledta)
       case tres of
         Left err -> liftIO $ throwIO (userError (show err))
         Right newdta -> do
@@ -354,10 +361,10 @@ runFilterJob pool mstyle saveAction = do
                   <> "%"
 
 -- | Filter all tiles in a database and save the filtered tiles back
-convertMbtiles :: MapboxStyle -> FilePath -> Bool -> IO ()
-convertMbtiles style mbtiles force = do
+convertMbtiles :: MapboxStyle -> Bool -> FilePath -> Bool -> IO ()
+convertMbtiles style rtlconvert mbtiles force = do
   runSingleDb force mbtiles (mbtiles <> ".filter") $ do
-    runFilterJob globalPool (Just style) (uncurry updateMbtile)
+    runFilterJob globalPool (Just style) rtlconvert (uncurry updateMbtile)
     -- If we were shrinking, call vacuum on database
     vacuumDb
   stopGlobalPool
@@ -365,9 +372,10 @@ convertMbtiles style mbtiles force = do
 -- | Publish the mbtile to an S3 target, make it ready for serving
 runPublishJob ::
      Maybe (MapboxStyle, EpochTime) -- ^ Parsed style + modification time of the style
+  -> Bool
   -> PublishOpts
   -> IO ()
-runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint} = do
+runPublishJob mstyle rtlconvert PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint} = do
   -- Create http connection manager with higher limits
   conncount <- maybe getNumCapabilities return pThreads
   manager <- newManager tlsManagerSettings{managerConnCount=conncount, managerIdleConnectionCount=conncount}
@@ -385,7 +393,7 @@ runPublishJob mstyle PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pT
   withThreads $ \pool -> do
     let hashfile = pMbtiles <> ".hashes"
     runParallelDb pForceFull conncount dbpool (pMbtiles <> "." <> modstr) hashfile $ do
-      runFilterJob pool (fst <$> mstyle) $ \((z,x,y,_), mnewdta) ->
+      runFilterJob pool (fst <$> mstyle) rtlconvert $ \((z,x,y,_), mnewdta) ->
         liftIO $ do
           let dstpath = "tiles/" <> mkPath (z,x,y)
           -- Skip empty tiles
@@ -438,8 +446,8 @@ makeModtimeStr mtime = do
     return (dbmtime <> "_" <> show stmtime)
 
 -- | Run a web server serving filtered/unfiltered tiles and metadata
-runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> FilePath -> IO ()
-runWebServer port mstyle mbpath = do
+runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> Bool -> FilePath -> IO ()
+runWebServer port mstyle rtlconvert mbpath = do
   dbpool <- DP.createPool (SQL.open mbpath) SQL.close 1 100 100
 
   -- Generate a JSON to be included as a metadata file
@@ -470,7 +478,7 @@ runWebServer port mstyle mbpath = do
               case mstyle of
                 Nothing -> return (Just dta)
                 Just (style,_) ->
-                  case filterTile z' style dta of
+                  case filterTile rtlconvert z' style dta of
                     Left err     -> raise (cs err)
                     Right newdta -> return newdta
             _ -> return Nothing
@@ -487,18 +495,18 @@ main = do
     CmdDump{fMvtSource, fZoomLevel, fStyles, fSourceName} -> do
         style <- getStyle fStyles >>= checkStyle fSourceName 14
         dumpPbf style fZoomLevel fMvtSource
-    CmdMbtiles{fMbtiles, fStyles, fSourceName, fForceFull} -> do
+    CmdMbtiles{fMbtiles, fStyles, fSourceName, fForceFull, fRtlConvert} -> do
         maxzoom <- getMaxZoom fMbtiles
         style <- getStyle fStyles >>= checkStyle fSourceName maxzoom
-        convertMbtiles style fMbtiles fForceFull
-    CmdWebServer{fModStyles, fWebPort, fMbtiles, fSourceName} -> do
+        convertMbtiles style fRtlConvert fMbtiles fForceFull
+    CmdWebServer{fModStyles, fWebPort, fMbtiles, fSourceName, fRtlConvert} -> do
         maxzoom <- getMaxZoom fMbtiles
         mstyle <- getMStyle fModStyles fSourceName maxzoom
-        runWebServer fWebPort mstyle fMbtiles
-    CmdPublish{fModStyles, fSourceName, fPublishOpts} -> do
+        runWebServer fWebPort mstyle fRtlConvert fMbtiles
+    CmdPublish{fModStyles, fSourceName, fRtlConvert, fPublishOpts} -> do
         maxzoom <- getMaxZoom (pMbtiles fPublishOpts)
         mstyle <- getMStyle fModStyles fSourceName maxzoom
-        runPublishJob mstyle fPublishOpts
+        runPublishJob mstyle fRtlConvert fPublishOpts
   where
     -- We need to adjust minZoom in the styles to be at least the maximum zoom level
     -- in the database
