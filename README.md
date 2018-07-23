@@ -5,6 +5,8 @@ parser for the Mapbox GL JS style and an executable that can:
 
 - Dump the tile (.mvt, .pbf files) and show which features will be included given the style file at a particular zoom level.
 - Iterate through the `mbtiles` file and filter the tile contents according to the MapBox style, thus making the `mbtiles` file smaller.
+- Preprocess attributes with right-to-left (arabic etc.) text fields; as a result the
+  mapbox-gl rtl plugin can be omitted.
 - Run a webserver for
   * serving the tiles from the `mbtile` file
   * serving the real-time filtered tiles
@@ -34,6 +36,10 @@ The `web` command should be compatibile with any mbtile file.
 
 I have not tested it but it will probably work on Windows as well.
 
+A special version of `text-icu` library is required. Everything should work correctly
+with stack, cabal users need to look into the `stack.yaml` file and install the library
+manually.
+
 ## Examples
 
 Show CLI help:
@@ -54,8 +60,9 @@ $ mapbox-filter web -p 3000 cz.mbtiles
 ```
 
 Serve the mbtiles file while doing online filtering according to the mapboxstyle.json file.
+Pre-process the right-to-left metadata text fields.
 ```
-$ mapbox-filter web -p 3000 -j mapboxstyle.json cz.mbtiles
+$ mapbox-filter web -p 3000 --rtl-convert -j mapboxstyle.json cz.mbtiles
 ```
 
 Publish filtered mbtiles to S3. Higher parallelism might be desirable, use the `-p`
@@ -97,7 +104,7 @@ better to use higher parallelism to achieve higher throughput. The following com
 will use 16 cores, 80 parallel threads and has an allocation unit set to 1 megabyte:
 
 ```
-$ mapbox-filter publish -j openmaptiles.json.js -u https://xxx.cloudfront.net/w -t s3://my-map-bucket/w osm-planet.mbtiles -p80 +RTS -N16 -A1m
+$ mapbox-filter publish -j openmaptiles.json.js -u https://xxx.cloudfront.net/w --rtl-convert -t s3://my-map-bucket/w osm-planet.mbtiles -p80 +RTS -N16 -A1m
 ```
 
 ### MD5 database tuning
