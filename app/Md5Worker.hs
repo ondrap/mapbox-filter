@@ -15,15 +15,12 @@ import           Control.Concurrent.BoundedChan
 import           Control.Concurrent.MVar        (MVar, newEmptyMVar, putMVar,
                                                  takeMVar)
 import           Control.Exception.Safe         (catchAny)
-import           Control.Monad                  (when)
 import           Crypto.Hash.MD5                (hashlazy)
 import qualified Data.ByteString                as BS
 import           Data.Maybe                     (listToMaybe)
 import qualified Data.Pool                      as DP
 import           Database.SQLite.Simple         (Connection, Only (..), query)
 import qualified Database.SQLite.Simple         as SQL
-import           System.Directory               (doesFileExist, removeFile,
-                                                 renameFile)
 
 import           Types                          (Column (..), TileData (..),
                                                  XyzRow (..), Zoom (..))
@@ -35,8 +32,6 @@ data Md5Message =
 data Md5Queue = Md5Queue {
     md5Q         :: BoundedChan Md5Message
   , md5DbOld     :: Maybe (DP.Pool Connection)
-  , md5DbName    :: FilePath
-  , md5NewDbName :: FilePath
 }
 
 sendMd5Tile :: Md5Queue -> (Zoom, Column, XyzRow) -> TileData -> IO ()
@@ -49,10 +44,6 @@ stopMd5Queue queue = do
   mvar <- newEmptyMVar :: IO (MVar ())
   writeChan (md5Q queue) (Md5Exit (putMVar mvar ()))
   takeMVar mvar
-  -- Rename dbname
-  oldExists <- doesFileExist (md5DbName queue)
-  when oldExists (removeFile (md5DbName queue))
-  renameFile (md5NewDbName queue) (md5DbName queue)
 
 tileChanged :: Md5Queue -> (Zoom, Column, XyzRow) -> Maybe TileData -> IO Bool
 tileChanged Md5Queue{md5DbOld=Nothing} _ (Just _) = return True
@@ -63,20 +54,17 @@ tileChanged Md5Queue{md5DbOld=Just dbpool} (z,x,y) mtile =
     let mhash = (\(TileData dta) -> hashlazy dta) <$> mtile
     return (mhash /= listToMaybe (fromOnly <$> res))
 
-runQueueThread :: FilePath -> Int -> IO Md5Queue
-runQueueThread dbpath thrcount = do
+runQueueThread :: Maybe FilePath -> FilePath -> Int -> IO Md5Queue
+runQueueThread olddbpath newdbpath thrcount = do
     queue <- newBoundedChan 400
-    oldexists <- doesFileExist dbpath
-    dbpool <- if oldexists
-              then Just <$> DP.createPool (SQL.open dbpath) SQL.close 1 100 thrcount
-              else return Nothing
-
-    let newdbpath = dbpath ++ ".new"
+    dbpool <- traverse mkPool olddbpath
     conn <- SQL.open newdbpath
     initDb conn
     _ <- forkIO (handleConn queue conn)
-    return (Md5Queue queue dbpool dbpath newdbpath)
+    return (Md5Queue queue dbpool)
   where
+    mkPool path = DP.createPool (SQL.open path) SQL.close 1 100 thrcount
+
     handleConn q conn = do
       msg <- readChan q
       case msg of

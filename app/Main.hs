@@ -95,6 +95,7 @@ data PublishOpts = PublishOpts {
   , pThreads    :: Maybe Int
   , pForceFull  :: Bool
   , pS3Endpoint :: Maybe BS.ByteString
+  , pDiffHashes :: Maybe FilePath
   , pMbtiles    :: FilePath
 }
 
@@ -174,6 +175,7 @@ publishOptions =
       <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
       <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
       <*> optional (strOption (long "s3-endpoint" <> metavar "HOSTNAME" <> help "Endpoint for S3 operations (use e.g. with Google Cloud Storage)"))
+      <*> optional (strOption (long "hashes-db" <> metavar "SQLITE" <> help "Old hashes.db for differential upload"))
       <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
     )
 
@@ -375,7 +377,7 @@ runPublishJob ::
   -> Bool
   -> PublishOpts
   -> IO ()
-runPublishJob mstyle rtlconvert PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint} = do
+runPublishJob mstyle rtlconvert PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint, pDiffHashes} = do
   -- Create http connection manager with higher limits
   conncount <- maybe getNumCapabilities return pThreads
   manager <- newManager tlsManagerSettings{managerConnCount=conncount, managerIdleConnectionCount=conncount}
@@ -392,7 +394,13 @@ runPublishJob mstyle rtlconvert PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUr
 
   withThreads $ \pool -> do
     let hashfile = pMbtiles <> ".hashes"
-    runParallelDb pForceFull conncount dbpool (pMbtiles <> "." <> modstr) hashfile $ do
+    let pConf = ParallelConfig {
+        pConnCount = conncount 
+      , pJobPath = pMbtiles <> "." <> modstr
+      , pMd5Path = hashfile
+      , pOldMd5Path = pDiffHashes
+    }
+    runParallelDb pConf pForceFull dbpool $ do
       runFilterJob pool (fst <$> mstyle) rtlconvert $ \((z,x,y,_), mnewdta) ->
         liftIO $ do
           let dstpath = "tiles/" <> mkPath (z,x,y)
@@ -429,7 +437,6 @@ runPublishJob mstyle rtlconvert PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUr
                     & poContentType ?~ "application/json"
           runResourceT $ runAWS env $
             void (send cmd)
-    -- TODO - publish hashfile...?
   where
     mkPath (z'@(Zoom z), Column x, tms_y) =
       let (XyzRow xyz_y) = toXyzY tms_y z'

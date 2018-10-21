@@ -5,6 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE StandaloneDeriving         #-}
 {-# LANGUAGE TypeApplications           #-}
+{-# LANGUAGE NamedFieldPuns         #-}
 
 module DbAccess where
 
@@ -288,11 +289,19 @@ instance HasMd5Queue ParallelDbRunner where
     q <- asks peMd5Queue
     liftIO $ sendMd5Tile q param tile
 
-runParallelDb :: Bool -> Int -> DP.Pool Connection -> FilePath -> FilePath -> ParallelDbRunner a -> IO a
-runParallelDb forceFull conncount mbpool jobpath md5path (ParallelDbRunner code) =
-  withConnection jobpath $ \jobconn -> do
+data ParallelConfig = ParallelConfig {
+    pConnCount :: Int
+  , pJobPath :: FilePath
+  , pMd5Path :: FilePath
+  , pOldMd5Path :: Maybe FilePath
+}
+
+runParallelDb :: ParallelConfig -> Bool -> DP.Pool Connection -> ParallelDbRunner a -> IO a
+runParallelDb ParallelConfig{pConnCount, pJobPath, pMd5Path, pOldMd5Path} forceFull 
+                mbpool (ParallelDbRunner code) =
+  withConnection pJobPath $ \jobconn -> do
     DP.withResource mbpool $ \conn -> checkJobDb jobconn conn forceFull
-    md5queue <- runQueueThread md5path conncount
+    md5queue <- runQueueThread pOldMd5Path pMd5Path pConnCount
     res <- runReaderT code (ParallelEnv mbpool jobconn md5queue)
     stopMd5Queue md5queue
     return res
