@@ -290,6 +290,7 @@ runFilterJob pool mstyle rtlconvert saveAction = do
     counter <- liftIO CNT.new -- TODO - take complete count from the job file...
     emptycnt <- liftIO CNT.new
     changecnt <- liftIO CNT.new
+    skipcnt <- liftIO CNT.new
     zlevels <- getIncompleteZooms
 
     errors <- getErrorTiles
@@ -297,11 +298,11 @@ runFilterJob pool mstyle rtlconvert saveAction = do
       liftIO $ putStrLn ("Processing error tiles: " <> show (length errors))
       for_ errors $ \tileArg@(z,x,y,_) ->
         (do
-          processTile counter emptycnt changecnt tileArg
+          processTile counter emptycnt changecnt skipcnt tileArg
           clearErrorTile (z,x,y)
           ) `catchAny` \err -> liftIO $ putStrLn ("Tile " <> show tileArg <> " error: " <> show err)
 
-    race_ (showStats total_count counter emptycnt changecnt) $
+    race_ (showStats total_count counter emptycnt changecnt skipcnt) $
       for_ zlevels $ \zoom -> do
         liftIO $ putStrLn $ "Filtering zoom: " <> show zoom
         cols <- getJobZoomColumns zoom
@@ -309,13 +310,13 @@ runFilterJob pool mstyle rtlconvert saveAction = do
           parallelFor_ colPool cols $ \col -> do
             tiles <- getColTiles zoom col
             parallelFor_  pool tiles $ \tileArg ->
-              processTile counter emptycnt changecnt tileArg
+              processTile counter emptycnt changecnt skipcnt tileArg
                 `catchAny` \err -> do
                     liftIO $ putStrLn ("Error on " <> show tileArg <> ": " <> show err)
                     markErrorTile tileArg
             markColumnComplete zoom col
   where
-    processTile counter emptycnt changecnt pos@(z@(Zoom z'),x,y,tileid) = do
+    processTile counter emptycnt changecnt skipcnt pos@(z@(Zoom z'),x,y,tileid) = do
       liftIO $ CNT.inc counter
       -- We assume the tile exists in the db...
       Just tiledta <- fetchTileTid tileid
@@ -330,10 +331,11 @@ runFilterJob pool mstyle rtlconvert saveAction = do
           liftIO $ whenNothing newdta (CNT.inc emptycnt)
           -- Check changes
           changed <- checkHashChanged (z,x,toXyzY y z) newdta
-          when changed $ do
-            -- Call job action
-            saveAction (pos, newdta)
-            liftIO $ CNT.inc changecnt
+          if | changed -> do
+                -- Call job action
+                saveAction (pos, newdta)
+                liftIO $ CNT.inc changecnt
+             | otherwise -> liftIO $ CNT.inc skipcnt
           addHash (z,x,toXyzY y z) newdta
 
     liftWithPool n f =
@@ -346,7 +348,7 @@ runFilterJob pool mstyle rtlconvert saveAction = do
     whenNothing Nothing f = f
     whenNothing _ _       = return ()
 
-    showStats total_count counter emptycnt changecnt =
+    showStats total_count counter emptycnt changecnt skipcnt =
       liftIO $ forever $ do
         let delay = 15
         start <- CNT.read counter
@@ -354,13 +356,14 @@ runFilterJob pool mstyle rtlconvert saveAction = do
         end <- CNT.read counter
         emptyc <- CNT.read emptycnt
         changec <- CNT.read changecnt
+        skipc <- CNT.read skipcnt
         let percent = round ((100 :: Double) * fromIntegral end / fromIntegral total_count) :: Int
             speed = round (fromIntegral (end - start) / (fromIntegral delay :: Double)) :: Int
         putStrLn $ "Completion status: " <> show percent
                   <> "%, speed: " <> show speed <> " tiles/sec"
                   <> " deleted: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral emptyc / fromIntegral end)
                   <> "%, written: " <> show (round @_ @Int $ (100 :: Double) * fromIntegral changec / fromIntegral end)
-                  <> "%"
+                  <> "%, skipped: " <> show skipc
 
 -- | Filter all tiles in a database and save the filtered tiles back
 convertMbtiles :: MapboxStyle -> Bool -> FilePath -> Bool -> IO ()
