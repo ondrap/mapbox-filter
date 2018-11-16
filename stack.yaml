@@ -4,7 +4,7 @@ packages:
 - .
 - location:
     git: https://github.com/ondrap/text-icu.git
-    commit: 649b8c4f84bf14004c774b1206ccb3d4fb25c212
+    commit: 2efdcf16d3ac0a11e1c7dc80f953a40fc5ae8f56
   extra-dep: true
 extra-deps:
 - vectortiles-1.4.0
