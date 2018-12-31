@@ -108,6 +108,15 @@ compileExpr (TOrdOp op e1 e2) =
       CGeq -> (>=)
       CLt  -> (<)
       CLeq -> (<=)
+compileExpr (TMatch inp cond def) = do
+    einp <- compileExpr inp
+    res <- matchCond einp cond
+    compileExpr res
+  where
+    matchCond _ [] = return def
+    matchCond val ((lbl,res):rest) = do
+        vlbl <- compileExpr lbl
+        if val == vlbl then return res else matchCond val rest
 
 -- | Run compiled expression on a particular feature
 runFilter :: CompiledExpr Bool -> FeatureType -> Feature gs -> Bool

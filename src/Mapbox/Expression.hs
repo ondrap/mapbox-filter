@@ -121,6 +121,7 @@ data TExp a where
   TNegate :: TExp Bool -> TExp Bool
   TConvert :: Bool -> TValue a -> [ATExp] -> TExp a
   TReadAttr :: AttrType a -> TExp a
+  TMatch :: Eq a => TExp a -> [(TExp a, TExp b)] -> TExp b -> TExp b
 
 instance Show (TExp a) where
   showsPrec p (TNum d) = showsPrec p d
@@ -138,6 +139,7 @@ instance Show (TExp a) where
   showsPrec p (TConvert force restype exprs) =
     showsPrec p exprs . showString " ->" . bool (showString " ") (showString "! ") force . showsPrec p restype
   showsPrec p (TReadAttr atype) = showString "attr " . showsPrec p atype
+  showsPrec p (TMatch inp cond def) = showString "match " . showsPrec p inp  . showString " " . showsPrec p cond . showString " "  . showsPrec p def
 
 type Env = HMap.HashMap T.Text ATExp
 
@@ -177,6 +179,21 @@ typeCheck env (Fix (UApp fname args)) =
     "!" | [arg] <- args -> do
         mexpr <- typeCheck env arg >>= forceType TTBool
         return (TNegate mexpr ::: TTBool)
+    "match" | (inpexp:rest) <- args, odd (length rest) -> do
+        (inp ::: intype) <- typeCheck env inpexp
+        (def ::: outtype) <- typeCheck env (last rest)
+        let mkpairs (a:b:prest) = (a,b) : mkpairs prest
+            mkpairs _ = []
+        let evalpair (a,b) = (,) <$> (typeCheck env a >>= forceType intype)
+                                 <*> (typeCheck env b >>= forceType outtype)
+        pairs <- traverse evalpair (mkpairs (init rest))
+        -- Add Eq constraint
+        case intype of
+          TTStr    -> return (TMatch inp pairs def ::: outtype)
+          TTNum    -> return (TMatch inp pairs def ::: outtype)
+          TTBool   -> return (TMatch inp pairs def ::: outtype)
+          TTNumArr -> return (TMatch inp pairs def ::: outtype)
+          TTAny    -> return (TMatch inp pairs def ::: outtype)
     "has" | [arg] <- args -> do
         mname <- typeCheck env arg >>= forceType TTStr
         return (TCheckMeta mname ::: TTBool)
