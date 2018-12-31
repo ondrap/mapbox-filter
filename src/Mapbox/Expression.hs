@@ -143,6 +143,18 @@ instance Show (TExp a) where
 
 type Env = HMap.HashMap T.Text ATExp
 
+-- | Existential witness for equality constraint
+data HasEq a where
+  HasEq :: Eq a => HasEq a
+
+-- | Return witness if the type has Eq instance
+hasEquality :: TTyp a -> Maybe (HasEq a)
+hasEquality TTBool = Just HasEq
+hasEquality TTNum = Just HasEq
+hasEquality TTStr = Just HasEq
+hasEquality TTNumArr = Just HasEq
+hasEquality TTAny = Just HasEq
+
 -- | Check that the input expression conforms to the requested type
 forceType :: TTyp a -> ATExp -> Either T.Text (TExp a)
 forceType t1 (mexp ::: t2) =
@@ -188,12 +200,9 @@ typeCheck env (Fix (UApp fname args)) =
                                  <*> (typeCheck env b >>= forceType outtype)
         pairs <- traverse evalpair (mkpairs (init rest))
         -- Add Eq constraint
-        case intype of
-          TTStr    -> return (TMatch inp pairs def ::: outtype)
-          TTNum    -> return (TMatch inp pairs def ::: outtype)
-          TTBool   -> return (TMatch inp pairs def ::: outtype)
-          TTNumArr -> return (TMatch inp pairs def ::: outtype)
-          TTAny    -> return (TMatch inp pairs def ::: outtype)
+        case hasEquality intype of
+          Just HasEq -> return (TMatch inp pairs def ::: outtype)
+          Nothing -> Left (cs $ "Type does not have a comparison: " <> show intype)
     "has" | [arg] <- args -> do
         mname <- typeCheck env arg >>= forceType TTStr
         return (TCheckMeta mname ::: TTBool)
@@ -202,12 +211,9 @@ typeCheck env (Fix (UApp fname args)) =
             (marg2 ::: t2) <- typeCheck env arg2
             case testEquality t1 t2 of
               Just Refl ->
-                case t1 of
-                  TTStr    -> return (TCmpOp op marg1 marg2 ::: TTBool)
-                  TTNum    -> return (TCmpOp op marg1 marg2 ::: TTBool)
-                  TTBool   -> return (TCmpOp op marg1 marg2 ::: TTBool)
-                  TTNumArr -> return (TCmpOp op marg1 marg2 ::: TTBool)
-                  TTAny    -> return (TCmpOp op marg1 marg2 ::: TTBool)
+                case hasEquality t1 of
+                  Just HasEq -> return (TCmpOp op marg1 marg2 ::: TTBool)
+                  Nothing -> Left (cs $ "Type does not have a comparison: " <> show t1)
               Nothing -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
                             <> ": " <> show t1 <> "vs. " <> show t2)
     _| Just op <- lookup fname [("<", CLt), ("<=", CLeq), (">", CGt), (">=", CGeq)],
