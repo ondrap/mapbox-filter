@@ -86,8 +86,9 @@ the `SOME_NUMBERS` change and a new full job is forced.
 The S3 is billed by a access request; in order to minimize access costs, the program
 automatically creates a file `<name>.mbtile.hashes`. When the publishing is complete, copy
 the file manually to S3 to have the information available later. 
-Upon next job restart (regardless if with or without the `-f` option),
-if the file `name.mbtiles.hashes` exists, only the changed tiles will be uploaded or deleted. 
+Upon next job restart (regardless if with or without the `-f` option), you can specify 
+the hash database with the `--hashes-db` parameter; only the changed tiles will be uploaded or deleted.
+A new hashes file will be created.
 This should minimize costs upon country updates, when only a minority of the tiles is changed.
 
 ## Performance considerations
