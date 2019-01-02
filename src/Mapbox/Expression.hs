@@ -149,12 +149,12 @@ data HasEq a where
   HasEq :: (Show a, Eq a) => HasEq a
 
 -- | Return witness if the type has Eq instance
-hasEquality :: TTyp a -> Maybe (HasEq a)
-hasEquality TTBool = Just HasEq
-hasEquality TTNum = Just HasEq
-hasEquality TTStr = Just HasEq
-hasEquality TTNumArr = Just HasEq
-hasEquality TTAny = Just HasEq
+hasEquality :: TTyp a -> HasEq a
+hasEquality TTBool = HasEq
+hasEquality TTNum = HasEq
+hasEquality TTStr = HasEq
+hasEquality TTNumArr = HasEq
+hasEquality TTAny = HasEq
 
 -- | Hacky conversion of literal/array of literals to list of literals; check type
 convertMatchLabel :: TTyp a -> UExp -> Either T.Text [a]
@@ -212,21 +212,17 @@ typeCheck env (Fix (UApp fname args)) =
         pairs <- traverse evalpair (mkpairs (init rest))
         -- Add Eq constraint
         case hasEquality intype of
-          Just HasEq -> return (TMatch inp pairs def ::: outtype)
-          Nothing -> Left (cs $ "Type does not have a comparison: " <> show intype)
+          HasEq -> return (TMatch inp pairs def ::: outtype)
     "has" | [arg] <- args -> do
         mname <- typeCheck env arg >>= forceType TTStr
         return (TCheckMeta mname ::: TTBool)
     _| Just op <- lookup fname [("==", CEq), ("!=", CNeq)], [arg1, arg2] <- args -> do
             (marg1 ::: t1) <- typeCheck env arg1
             (marg2 ::: t2) <- typeCheck env arg2
-            case testEquality t1 t2 of
-              Just Refl ->
-                case hasEquality t1 of
-                  Just HasEq -> return (TCmpOp op marg1 marg2 ::: TTBool)
-                  Nothing -> Left (cs $ "Type does not have a comparison: " <> show t1)
-              Nothing -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
-                            <> ": " <> show t1 <> "vs. " <> show t2)
+            case (testEquality t1 t2, hasEquality t1)  of
+              (Just Refl, HasEq) -> return (TCmpOp op marg1 marg2 ::: TTBool)
+              (Nothing, _) -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
+                              <> ": " <> show t1 <> "vs. " <> show t2)
     _| Just op <- lookup fname [("<", CLt), ("<=", CLeq), (">", CGt), (">=", CGeq)],
         [arg1, arg2] <- args -> do
             (marg1 ::: t1) <- typeCheck env arg1
