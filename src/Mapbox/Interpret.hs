@@ -114,9 +114,9 @@ compileExpr (TMatch inp cond def) = do
     compileExpr res
   where
     matchCond _ [] = return def
-    matchCond val ((lbl,res):rest) = do
-        vlbl <- compileExpr lbl
-        if val == vlbl then return res else matchCond val rest
+    matchCond val ((lbls,res):rest)
+      | val `elem` lbls = return res
+      | otherwise = matchCond val rest
 
 -- | Run compiled expression on a particular feature
 runFilter :: CompiledExpr Bool -> FeatureType -> Feature gs -> Bool

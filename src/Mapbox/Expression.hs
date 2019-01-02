@@ -27,6 +27,7 @@ import           Data.Scientific          (Scientific)
 import           Data.String.Conversions  (cs)
 import qualified Data.Text                as T
 import           Data.Type.Equality       ((:~:) (..), TestEquality (..))
+import           Data.Foldable            (toList)
 
 import           Mapbox.UntypedExpression
 
@@ -121,7 +122,7 @@ data TExp a where
   TNegate :: TExp Bool -> TExp Bool
   TConvert :: Bool -> TValue a -> [ATExp] -> TExp a
   TReadAttr :: AttrType a -> TExp a
-  TMatch :: Eq a => TExp a -> [(TExp a, TExp b)] -> TExp b -> TExp b
+  TMatch :: (Show a, Eq a) => TExp a -> [([a], TExp b)] -> TExp b -> TExp b
 
 instance Show (TExp a) where
   showsPrec p (TNum d) = showsPrec p d
@@ -143,9 +144,9 @@ instance Show (TExp a) where
 
 type Env = HMap.HashMap T.Text ATExp
 
--- | Existential witness for equality constraint
+-- | Existential witness for equality constraint (add Show constraint for easier Show deriving)
 data HasEq a where
-  HasEq :: Eq a => HasEq a
+  HasEq :: (Show a, Eq a) => HasEq a
 
 -- | Return witness if the type has Eq instance
 hasEquality :: TTyp a -> Maybe (HasEq a)
@@ -154,6 +155,15 @@ hasEquality TTNum = Just HasEq
 hasEquality TTStr = Just HasEq
 hasEquality TTNumArr = Just HasEq
 hasEquality TTAny = Just HasEq
+
+-- | Hacky conversion of literal/array of literals to list of literals; check type
+convertMatchLabel :: TTyp a -> UExp -> Either T.Text [a]
+convertMatchLabel TTNum (Fix (UNum n)) = Right [n]
+convertMatchLabel TTNum (Fix (UNumArr arr)) = Right (toList arr)
+convertMatchLabel TTStr (Fix (UStr s)) = Right [s]
+convertMatchLabel TTStr (Fix (UStrArr args)) = Right args
+convertMatchLabel TTBool (Fix (UBool b)) = Right [b]
+convertMatchLabel _ arg = Left (cs $ "Impossible match label: " <> show arg)
 
 -- | Check that the input expression conforms to the requested type
 forceType :: TTyp a -> ATExp -> Either T.Text (TExp a)
@@ -169,6 +179,7 @@ typeCheck _ (Fix (UNum num)) = Right (TNum num ::: TTNum)
 typeCheck _ (Fix (UStr str)) = Right (TStr str ::: TTStr)
 typeCheck _ (Fix (UBool b)) = Right (TBool b ::: TTBool)
 typeCheck _ (Fix (UNumArr n)) = Right (TNumArr n ::: TTNumArr)
+typeCheck _ (Fix (UStrArr n)) = Left ("StrArr found in unexpected place, internal error: " <> cs (show n))
 typeCheck env (Fix (UVar var)) =
     maybe (Left ("Variable " <> var <> " not found.")) Right (HMap.lookup var env)
 typeCheck env (Fix (ULet var expr next)) = do
@@ -196,7 +207,7 @@ typeCheck env (Fix (UApp fname args)) =
         (def ::: outtype) <- typeCheck env (last rest)
         let mkpairs (a:b:prest) = (a,b) : mkpairs prest
             mkpairs _ = []
-        let evalpair (a,b) = (,) <$> (typeCheck env a >>= forceType intype)
+        let evalpair (a,b) = (,) <$> convertMatchLabel intype a
                                  <*> (typeCheck env b >>= forceType outtype)
         pairs <- traverse evalpair (mkpairs (init rest))
         -- Add Eq constraint

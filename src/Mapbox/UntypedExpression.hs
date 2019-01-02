@@ -22,6 +22,7 @@ type NumArray = V.Vector Scientific
 data UExpF r =
   UNum Scientific
   | UStr T.Text
+  | UStrArr [T.Text]
   | UBool Bool
   | UNumArr NumArray
   | UVar Id
@@ -33,6 +34,7 @@ type UExp = Fix UExpF
 instance Show1 UExpF where
   liftShowsPrec _ _ d (UNum n) = showParen (d > 10) $ showString "UNum " . showsPrec 11 n
   liftShowsPrec _ _ d (UStr n) = showParen (d > 10) $ showString "UStr " . showsPrec 11 n
+  liftShowsPrec _ _ d (UStrArr n) = showParen (d > 10) $ showString "UStrArr " . showsPrec 11 n
   liftShowsPrec _ _ d (UBool n) = showParen (d > 10) $ showString "UBool " . showsPrec 11 n
   liftShowsPrec _ _ d (UVar n) = showParen (d > 10) $ showString "UVar " . showsPrec 11 n
   liftShowsPrec _ _ d (UNumArr n) = showParen (d > 10) $ showString "UNumArr " . showsPrec 11 n
@@ -57,6 +59,7 @@ instance FromJSON UExp where
                     case fid of
                       "let" -> letexpr iargs
                       "var" -> varexpr iargs
+                      "match" -> matchexpr iargs
                       _     -> Fix . UApp fid <$> traverse AE.parseJSON iargs
            | otherwise = fail "Empty array not supported"
       letexpr (AE.String vname : val : rest) = do
@@ -67,3 +70,14 @@ instance FromJSON UExp where
       letexpr _ = fail "Invalid let expression"
       varexpr [AE.String nm] = return (Fix (UVar nm))
       varexpr _              = fail "Invalid var expression"
+      -- We have to parse 'match' separately, as it has different types on 'label' - only literal/array of literal allowed
+      -- every other is special
+      matchexpr args = Fix . UApp "match" <$> traverse parseMatchArg (zip (cycle [False, True]) args)
+      parseMatchArg (True, arg) = 
+          Fix <$> ((UStrArr <$> AE.parseJSON arg)
+                  <|> (UNumArr <$> AE.parseJSON arg)
+                  <|> (UNum <$> AE.parseJSON arg)
+                  <|> (UStr <$> AE.parseJSON arg)
+                  <|> (UBool <$> AE.parseJSON arg)
+          )
+      parseMatchArg (False, arg) = AE.parseJSON arg
