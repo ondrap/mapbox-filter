@@ -163,6 +163,11 @@ convertMatchLabel TTNum (Fix (UNumArr arr)) = Right (toList arr)
 convertMatchLabel TTStr (Fix (UStr s)) = Right [s]
 convertMatchLabel TTStr (Fix (UStrArr args)) = Right args
 convertMatchLabel TTBool (Fix (UBool b)) = Right [b]
+convertMatchLabel TTAny (Fix (UNum n)) = Right [ANum n]
+convertMatchLabel TTAny (Fix (UNumArr arr)) = Right (ANum <$> toList arr)
+convertMatchLabel TTAny (Fix (UStr s)) = Right [AStr s]
+convertMatchLabel TTAny (Fix (UStrArr args)) = Right (AStr <$> args)
+convertMatchLabel TTAny (Fix (UBool b)) = Right [ABool b]
 convertMatchLabel _ arg = Left (cs $ "Impossible match label: " <> show arg)
 
 -- | Check that the input expression conforms to the requested type
