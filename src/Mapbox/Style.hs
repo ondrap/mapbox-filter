@@ -80,7 +80,7 @@ instance FromJSON Layer where
         -- Directly typecheck and compile filter
         _lFilter <- case flt of
             Nothing   -> return Nothing
-            Just uexp -> either fail (return . Just) (compileExpr <$> typeCheckFilter uexp)
+            Just uexp -> either (fail . T.unpack) (return . Just) (compileExpr <$> typeCheckFilter uexp)
         -- Scrape used attributes
         (paint :: HMap.HashMap T.Text UExp) <- o .:? "paint" .!= mempty
         layout <- o .:? "layout" .!= mempty

@@ -247,9 +247,5 @@ typeCheck env (Fix (UApp fname args)) =
     _     -> Left ("Unknown function name / wrong param count: " <> fname)
 
 -- | Convert an untyped expression to a filter (Bool) expression
-typeCheckFilter :: UExp -> Either String (TExp Bool)
-typeCheckFilter uexp =
-  case typeCheck mempty uexp of
-    Right (mexp ::: TTBool) -> return mexp
-    Right (_ ::: otype) -> Left ("Expression has a type " <> show otype <> ", expected Bool")
-    Left err -> Left (T.unpack err)
+typeCheckFilter :: UExp -> Either T.Text (TExp Bool)
+typeCheckFilter = typeCheck mempty >=> forceType TTBool
