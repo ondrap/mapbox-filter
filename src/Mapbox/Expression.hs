@@ -17,6 +17,7 @@ module Mapbox.Expression (
   , tValToTTyp
   , anyValToTVal
   , tvalToAny
+  , TValue(..)
 ) where
 
 import           Control.Monad            ((>=>))
@@ -215,6 +216,15 @@ typeCheck env (Fix (UApp fname args)) =
     "boolean" -> do
         eargs <- traverse (typeCheck env) args
         return (TConvert False TVBool eargs ::: TTBool)
+    "to-number" -> do
+      eargs <- traverse (typeCheck env) args
+      return (TConvert True TVNum eargs ::: TTNum)
+    "to-string" -> do
+      eargs <- traverse (typeCheck env) args
+      return (TConvert True TVStr eargs ::: TTStr)
+    "to-boolean" -> do
+      eargs <- traverse (typeCheck env) args
+      return (TConvert True TVBool eargs ::: TTBool)
     "get" | [arg] <- args -> do
         mname <- typeCheck env arg >>= forceType TTStr
         return (TReadMeta mname ::: TTAny)

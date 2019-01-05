@@ -22,12 +22,14 @@ import           Data.Scientific            (fromFloatDigits)
 import           Data.String.Conversions    (cs)
 import           Data.Type.Equality         ((:~:) (..), TestEquality (..))
 import           Geography.VectorTile       (Feature (..), Val (..))
+import           Text.Read                  (readMaybe)
+import qualified Data.Text                  as T
 
 import           Mapbox.Expression          (ATExp (..), AnyValue (..),
                                              AttrType (..), BoolFunc (..),
                                              CmpOp (..), OrdOp (..), TExp (..),
                                              TTyp (..), anyValToTVal,
-                                             tValToTTyp, tvalToAny)
+                                             tValToTTyp, tvalToAny, TValue(..))
 
 data FeatureType = Point | LineString | Polygon
   deriving (Show)
@@ -84,6 +86,35 @@ compileExpr (TConvert False restyp ((vexpr ::: vtyp):rest)) =
     ) <|> tryNextArg
   where
     tryNextArg = compileExpr (TConvert False restyp rest)
+compileExpr (TConvert True _ []) = failExpr
+compileExpr (TConvert True TVStr ((item ::: t):_)) = do
+    val <- compileExpr item
+    return $ case tvalToAny t val of
+      ANum n -> T.pack (show n)
+      ABool True -> "true"
+      ABool False -> "false"
+      AStr s -> s
+      ANumArray a -> T.pack (show a)
+compileExpr (TConvert True TVNum ((item ::: t):rest)) = do
+    val <- compileExpr item
+    case toNum (tvalToAny t val) of
+        Just res -> return res
+        Nothing -> compileExpr (TConvert True TVNum rest)
+  where
+    toNum (ANum n) = Just n
+    toNum (ABool True) = Just 1
+    toNum (ABool False) = Just 0
+    toNum (AStr s) = readMaybe (T.unpack s)
+    toNum _ = Nothing
+compileExpr (TConvert True TVBool ((item ::: t):_)) = do -- boolean always convert, ignore rest
+    val <- compileExpr item
+    return (toBoolean (tvalToAny t val))
+  where
+      toBoolean (AStr "") = False
+      toBoolean (ANum 0) = False
+      toBoolean (ABool b) = b
+      -- TODO - NaN should be there too, but we probably can't get that into scientific
+      toBoolean _ = True
 compileExpr (TConvert True _ _) = error "Not Implemented"
 compileExpr (TBoolFunc bf exprs) =
     bop bf <$> traverse compileExpr exprs
