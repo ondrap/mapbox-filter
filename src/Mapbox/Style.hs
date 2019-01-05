@@ -57,6 +57,7 @@ scrapeExprMeta = para getMeta
     getMeta (UApp _ lst) = mconcat (snd <$> lst)
     getMeta (ULet _ (_,s1) (_,s2)) = s1 <> s2
     getMeta (UStr str) = deinterpolate str
+    getMeta (UFunction{ufProperty=Just tid}) = HSet.singleton tid
     getMeta _ = mempty
     -- Extract metadata names from {} notation from a string
     deinterpolate txt =

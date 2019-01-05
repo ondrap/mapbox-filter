@@ -200,6 +200,7 @@ typeCheck _ (Fix (UStr str)) = Right (TStr str ::: TTStr)
 typeCheck _ (Fix (UBool b)) = Right (TBool b ::: TTBool)
 typeCheck _ (Fix (UNumArr n)) = Right (TNumArr n ::: TTNumArr)
 typeCheck _ (Fix (UStrArr n)) = Left ("StrArr found in unexpected place, internal error: " <> cs (show n))
+typeCheck _ (Fix UFunction{}) = Left "Functions (stops) are not implemented."
 typeCheck env (Fix (UVar var)) =
     maybe (Left ("Variable " <> var <> " not found.")) Right (HMap.lookup var env)
 typeCheck env (Fix (ULet var expr next)) = do

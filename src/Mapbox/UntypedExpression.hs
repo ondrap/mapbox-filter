@@ -7,7 +7,7 @@
 module Mapbox.UntypedExpression where
 
 import           Control.Applicative   ((<|>))
-import           Data.Aeson            (FromJSON (..))
+import           Data.Aeson            (FromJSON (..), (.:?))
 import qualified Data.Aeson            as AE
 import           Data.Functor.Classes
 import           Data.Functor.Foldable
@@ -28,6 +28,7 @@ data UExpF r =
   | UVar Id
   | UApp Id [r]
   | ULet Id r r
+  | UFunction { ufProperty :: Maybe T.Text } -- Function - we should have 'base', 'stops' etc., currently unimplemented
   deriving (Show, Functor)
 type UExp = Fix UExpF
 
@@ -44,13 +45,16 @@ instance Show1 UExpF where
   liftShowsPrec sp _ d (UApp tid lst) =  showParen (d > 10) $
       showString "UApp " . showsPrec 11 tid . showString " "
       . mconcat (map (\l -> showChar ' ' . sp 11 l) lst)
+  liftShowsPrec _ _ d (UFunction pid) = showParen (d > 10) $ showString "UFunction " . showsPrec 11 pid
 
 instance FromJSON UExp where
   parseJSON (AE.String str) = return (Fix (UStr str))
   parseJSON (AE.Number num) = return (Fix (UNum num))
   parseJSON (AE.Bool b) = return (Fix (UBool b))
-  parseJSON (AE.Object _) = fail "Objects not supported as expression"
   parseJSON AE.Null = fail "Null not supported as expression"
+  parseJSON (AE.Object o) = do
+      prop <- o .:? "property"
+      return (Fix (UFunction prop))
   parseJSON (AE.Array arr) = numarr <|> expr
     where
       numarr = Fix . UNumArr <$> traverse AE.parseJSON arr
