@@ -27,7 +27,7 @@ import           Mapbox.Expression          (ATExp (..), AnyValue (..),
                                              AttrType (..), BoolFunc (..),
                                              CmpOp (..), OrdOp (..), TExp (..),
                                              TTyp (..), anyValToTVal,
-                                             tValToTTyp)
+                                             tValToTTyp, tvalToAny)
 
 data FeatureType = Point | LineString | Polygon
   deriving (Show)
@@ -117,6 +117,7 @@ compileExpr (TMatch inp cond def) = do
     matchCond val ((lbls,res):rest)
       | val `elem` lbls = return res
       | otherwise = matchCond val rest
+compileExpr (TToAny (arg ::: t)) = tvalToAny t <$> compileExpr arg
 
 -- | Run compiled expression on a particular feature
 runFilter :: CompiledExpr Bool -> FeatureType -> Feature gs -> Bool

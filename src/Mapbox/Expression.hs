@@ -16,12 +16,14 @@ module Mapbox.Expression (
   , ATExp(..)
   , tValToTTyp
   , anyValToTVal
+  , tvalToAny
 ) where
 
 import           Control.Monad            ((>=>))
 import           Data.Bool                (bool)
 import           Data.Functor.Foldable    (Fix (..))
 import qualified Data.HashMap.Strict      as HMap
+import           Data.Maybe               (isJust)
 import           Data.Monoid              ((<>))
 import           Data.Scientific          (Scientific)
 import           Data.String.Conversions  (cs)
@@ -69,6 +71,9 @@ instance TestEquality TTyp where
   testEquality TTAny TTAny       = Just Refl
   testEquality _ _               = Nothing
 
+typeEqual :: TTyp a -> TTyp b -> Bool
+typeEqual a b = isJust (testEquality a b)
+
 instance Show (TTyp a) where
   showsPrec _ TTBool   = showString "Bool"
   showsPrec _ TTNum    = showString "Number"
@@ -94,6 +99,13 @@ anyValToTVal TVNum (ANum n)          = Just n
 anyValToTVal TVStr (AStr s)          = Just s
 anyValToTVal TVNumArr (ANumArray na) = Just na
 anyValToTVal _ _                     = Nothing
+
+tvalToAny :: TTyp a -> a -> AnyValue
+tvalToAny TTBool b = ABool b
+tvalToAny TTNum n = ANum n
+tvalToAny TTStr t = AStr t
+tvalToAny TTNumArr a = ANumArray a
+tvalToAny TTAny a = a
 
 instance Show (TValue a) where
   showsPrec _ TVBool   = showString "Bool"
@@ -123,6 +135,7 @@ data TExp a where
   TConvert :: Bool -> TValue a -> [ATExp] -> TExp a
   TReadAttr :: AttrType a -> TExp a
   TMatch :: (Show a, Eq a) => TExp a -> [([a], TExp b)] -> TExp b -> TExp b
+  TToAny :: ATExp -> TExp AnyValue
 
 instance Show (TExp a) where
   showsPrec p (TNum d) = showsPrec p d
@@ -141,6 +154,7 @@ instance Show (TExp a) where
     showsPrec p exprs . showString " ->" . bool (showString " ") (showString "! ") force . showsPrec p restype
   showsPrec p (TReadAttr atype) = showString "attr " . showsPrec p atype
   showsPrec p (TMatch inp cond def) = showString "match " . showsPrec p inp  . showString " " . showsPrec p cond . showString " "  . showsPrec p def
+  showsPrec p (TToAny atval) = showString "*to_any* " . showsPrec p atval
 
 type Env = HMap.HashMap T.Text ATExp
 
@@ -224,10 +238,16 @@ typeCheck env (Fix (UApp fname args)) =
     _| Just op <- lookup fname [("==", CEq), ("!=", CNeq)], [arg1, arg2] <- args -> do
             (marg1 ::: t1) <- typeCheck env arg1
             (marg2 ::: t2) <- typeCheck env arg2
+            -- We could theoretically downgrade to any completely, but let's do at least some
+            -- type check and rule out some cases during compilation
             case (testEquality t1 t2, hasEquality t1)  of
               (Just Refl, HasEq) -> return (TCmpOp op marg1 marg2 ::: TTBool)
-              (Nothing, _) -> Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
-                              <> ": " <> show t1 <> "vs. " <> show t2)
+              (Nothing, _)
+                | typeEqual t1 TTAny || typeEqual t2 TTAny ->
+                    return (TCmpOp op (TToAny (marg1 ::: t1)) (TToAny (marg2 ::: t2)) ::: TTBool)
+                | otherwise ->
+                    Left (cs $ "Comparing unequal things: " <> show arg1 <> ", " <> show arg2
+                                <> ": " <> show t1 <> "vs. " <> show t2)
     _| Just op <- lookup fname [("<", CLt), ("<=", CLeq), (">", CGt), (">=", CGeq)],
         [arg1, arg2] <- args -> do
             (marg1 ::: t1) <- typeCheck env arg1
