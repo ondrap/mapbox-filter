@@ -43,6 +43,7 @@ instance Show VectorLayer where
 data Layer =
     VectorType VectorLayer
   | RasterLayer T.Text
+  | BackgroundLayer
   deriving (Show)
 makePrisms ''Layer
 
@@ -69,13 +70,16 @@ scrapeExprMeta = para getMeta
 
 instance FromJSON Layer where
   parseJSON = AE.withObject "Layer" $ \o -> do
-    _lSource <- o .: "source"
-    _lMinZoom <- o .:? "minzoom"
-    _lMaxZoom <- o .:? "maxzoom"
     ltype <- o .: "type"
     case (ltype :: T.Text) of
-      "raster" -> return (RasterLayer _lSource)
+      "background" ->  return BackgroundLayer
+      "raster" -> do
+        source <- o .: "source"
+        return (RasterLayer source)
       _ -> do -- Vector layers
+        _lMinZoom <- o .:? "minzoom"
+        _lMaxZoom <- o .:? "maxzoom"
+        _lSource <- o .: "source"
         _lSourceLayer <- o .: "source-layer"
         flt <- o .:? "filter"
         -- Directly typecheck and compile filter
