@@ -24,6 +24,8 @@ import           Control.Monad.Fail                   (MonadFail (..))
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
 import qualified Data.Aeson                           as AE
+import qualified Data.Aeson.Lens                      as AEL
+import           Data.Aeson.Encode.Pretty             (encodePretty)
 import           Data.Bool                            (bool)
 import qualified Data.ByteString                      as BS
 import qualified Data.ByteString.Lazy                 as BL
@@ -84,6 +86,7 @@ import           Mapbox.Interpret                     (FeatureType (..),
 import           Mapbox.Style                         (MapboxStyle, lMinZoom,
                                                        lSource, msLayers,
                                                        _VectorType)
+import           Mapbox.OldStyleConvert               (convertToNew)
 import           Types
 
 data PublishTarget = PublishFs FilePath | PublishS3 BucketName
@@ -126,6 +129,9 @@ data CmdLine =
     , fSourceName  :: Maybe T.Text
     , fPublishOpts :: PublishOpts
   }
+  | CmdConvert {
+      fStyle :: FilePath
+  }
 
 -- | The same as 'some', but generate NonEmpty list (makes more sense)
 nsome :: Alternative f => f a -> f (NonEmpty a)
@@ -154,6 +160,9 @@ webOptions =
               <*> option auto (short 'p' <> long "port" <> help "Web port number")
               <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
 
+convertOptions :: Parser CmdLine
+convertOptions =
+  CmdConvert <$> argument str (metavar "FILENAME" <> help "Style source")
 
 s3Bucket :: ReadM PublishTarget
 s3Bucket = maybeReader s3Reader <|> maybeReader (Just . PublishFs)
@@ -179,6 +188,8 @@ publishOptions =
       <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
     )
 
+
+
 cmdLineParser  :: Parser CmdLine
 cmdLineParser =
   subparser $
@@ -186,6 +197,8 @@ cmdLineParser =
     <> command "filter" (info (helper <*> mbtileOptions) (progDesc "Run filtering on a MBTiles database"))
     <> command "web" (info (helper <*> webOptions) (progDesc "Run a web server for serving tiles"))
     <> command "publish" (info (helper <*> publishOptions) (progDesc "Publish mbtile to S3"))
+    <> command "convert-old-filter" (info (helper <*> convertOptions) 
+                                    (progDesc "Convert style with deprecated filter to new filter"))
 
 progOpts :: ParserInfo CmdLine
 progOpts = info (cmdLineParser <**> helper)
@@ -498,6 +511,20 @@ runWebServer port mstyle rtlconvert mbpath = do
             raw dta
           Nothing -> raw "" -- Empty tile
 
+-- | Read style from filepath, convert 'filter' to newstyle and write to stdout
+runConversion :: FilePath -> IO ()
+runConversion fname = do
+  bstyle <- BS.readFile fname
+  case AE.eitherDecodeStrict bstyle of
+    Left err  -> error ("Parsing mapbox style failed: " <> err)
+    Right (style :: AE.Value) -> do
+      let mnewstyle = (AEL.key "layers" . AEL._Array . traverse . AEL.key "filter") convertToNew style
+      case mnewstyle of
+        Left err -> error ("Conversion error: " <> err)
+        Right res -> do
+          BL.putStr (encodePretty res)
+          BL.putStr (BL.pack [0x10])
+
 main :: IO ()
 main = do
   opts <- execParser progOpts
@@ -517,6 +544,7 @@ main = do
         maxzoom <- getMaxZoom (pMbtiles fPublishOpts)
         mstyle <- getMStyle fModStyles fSourceName maxzoom
         runPublishJob mstyle fRtlConvert fPublishOpts
+    CmdConvert{fStyle} -> runConversion fStyle
   where
     -- We need to adjust minZoom in the styles to be at least the maximum zoom level
     -- in the database

@@ -43,6 +43,7 @@ library
       Mapbox.Interpret
       Mapbox.Filters
       Mapbox.UntypedExpression
+      Mapbox.OldStyleConvert
   default-language: Haskell2010
   ghc-options: -Wall -Wcompat
 
@@ -84,4 +85,6 @@ executable mapbox-filter
     , unliftio
     , cryptohash-md5
     , BoundedChan
+    , aeson-pretty
+    , lens-aeson
   default-language: Haskell2010
