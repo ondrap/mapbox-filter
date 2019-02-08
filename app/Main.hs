@@ -29,6 +29,7 @@ import           Data.Aeson.Encode.Pretty             (encodePretty)
 import           Data.Bool                            (bool)
 import qualified Data.ByteString                      as BS
 import qualified Data.ByteString.Lazy                 as BL
+import qualified Data.ByteString.Lazy.Char8           as BL8
 import           Data.Foldable                        (for_)
 import qualified Data.HashMap.Strict                  as HMap
 import           Data.List                            (nub)
@@ -521,9 +522,7 @@ runConversion fname = do
       let mnewstyle = (AEL.key "layers" . AEL._Array . traverse . AEL.key "filter") convertToNew style
       case mnewstyle of
         Left err -> error ("Conversion error: " <> err)
-        Right res -> do
-          BL.putStr (encodePretty res)
-          BL.putStr (BL.pack [0x10])
+        Right res -> BL8.putStrLn (encodePretty res)
 
 main :: IO ()
 main = do
