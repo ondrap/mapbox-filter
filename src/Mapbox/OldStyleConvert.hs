@@ -14,7 +14,7 @@ convertToNew (AE.Array arr)
     runGet :: T.Text -> AE.Value
     runGet "$type" = toJSON [AE.String "geometry-type"]
     runGet "$id" = toJSON [AE.String "id"]
-    runGet other = toJSON ["get", other, ""]
+    runGet other = toJSON ["get", other]
 
     runFunc :: T.Text -> [AE.Value] -> Either String AE.Value
     runFunc "has" [String key] = Right $ toJSON ["has", key]
