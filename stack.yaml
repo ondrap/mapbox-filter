@@ -1,4 +1,4 @@
-resolver: lts-12.26
+resolver: lts-13.19
 
 packages:
 - .
@@ -8,3 +8,6 @@ packages:
   extra-dep: true
 extra-deps:
 - vectortiles-1.4.0
+- protocol-buffers-2.4.11
+- protocol-buffers-descriptor-2.4.11
+allow-newer: true

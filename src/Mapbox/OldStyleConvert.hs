@@ -14,7 +14,7 @@ convertToNew (AE.Array arr)
     runGet :: T.Text -> AE.Value
     runGet "$type" = toJSON [AE.String "geometry-type"]
     runGet "$id" = toJSON [AE.String "id"]
-    runGet other = toJSON ["get", other]
+    runGet other = toJSON ["get", other, ""]
 
     runFunc :: T.Text -> [AE.Value] -> Either String AE.Value
     runFunc "has" [String key] = Right $ toJSON ["has", key]
@@ -32,11 +32,10 @@ convertToNew (AE.Array arr)
       | dfunc == "none" = do
           newargs <- traverse convertToNew args
           Right $ toJSON $ [String "all"] ++ map ((\x -> toJSON [String "!", x])) newargs
-    runFunc "!in" args = do
-      infunc <- runFunc "in" args
-      return $ toJSON [String "!", infunc]
-    runFunc "in" (AE.String key:vals) = do
-      return $ toJSON [String "match", toJSON ["string", runGet key], toJSON vals, toJSON True, toJSON False ]
+    runFunc "!in" (AE.String key:vals) =
+      return $ toJSON [String "match", toJSON ["string", runGet key, ""], toJSON vals, toJSON False, toJSON True ]
+    runFunc "in" (AE.String key:vals) =
+      return $ toJSON [String "match", toJSON ["string", runGet key, ""], toJSON vals, toJSON True, toJSON False ]
     runFunc f args = Left ("Unknown func or params: " <> show f <> ", " <> show args)
 
 convertToNew v = Left ("Parse error: " <> show v)
