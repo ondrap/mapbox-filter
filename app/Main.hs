@@ -4,10 +4,13 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE ViewPatterns        #-}
+{-# LANGUAGE FlexibleContexts        #-}
 
 module Main where
 
-import           Codec.Compression.GZip               (decompress)
+import           Codec.Compression.GZip    (CompressParams (compressLevel),
+                                            bestCompression, compressWith,
+                                            decompress, defaultCompressParams)
 import           Control.Concurrent                   (getNumCapabilities,
                                                        threadDelay)
 import           Control.Concurrent.ParallelIO.Global (globalPool,
@@ -17,7 +20,7 @@ import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
 import           Control.Exception.Safe               (bracket, throwIO)
 import           Control.Lens                         (over, (%~), (&), (.~),
                                                        (<&>), (?~), (^.), (^..),
-                                                       (^?), _Just)
+                                                       (^?), _Just, traverseOf, _1, sequenceOf)
 import           Control.Monad                        (forever, unless, void,
                                                        when)
 import           Control.Monad.Fail                   (MonadFail (..))
@@ -34,10 +37,11 @@ import           Data.Foldable                        (for_)
 import qualified Data.HashMap.Strict                  as HMap
 import           Data.List                            (nub)
 import           Data.List.NonEmpty                   (NonEmpty, nonEmpty)
-import           Data.Maybe                           (fromMaybe)
+import           Data.Maybe                           (fromMaybe, mapMaybe)
 import qualified Data.Pool                            as DP
 import           Data.Semigroup                       (sconcat, (<>))
 import           Data.String.Conversions              (cs)
+import           Control.Newtype                      (Newtype(unpack))
 import qualified Data.Text                            as T
 import qualified Data.Text.IO                         as T
 import qualified Data.Text.Lazy                       as TL
@@ -47,7 +51,8 @@ import           Database.SQLite.Simple               (Only (..), query_,
 import qualified Database.SQLite.Simple               as SQL
 import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
-                                                       polygons, tile)
+                                                       polygons, tile, untile,
+                                                       VectorTile, geometries)
 import           Network.AWS                          (AccessKey (..), Credentials (Discover, FromKeys),
                                                        SecretKey (..),
                                                        configure, envManager,
@@ -88,6 +93,7 @@ import           Mapbox.Style                         (MapboxStyle, lMinZoom,
                                                        lSource, msLayers,
                                                        _VectorType)
 import           Mapbox.OldStyleConvert               (convertToNew)
+import           Mapbox.DownCopy                      (DownCopySpec, dDstZoom, copyDown)
 import           Types
 
 data PublishTarget = PublishFs FilePath | PublishS3 BucketName
@@ -119,6 +125,7 @@ data CmdLine =
   }
   | CmdWebServer {
       fModStyles  :: [FilePath]
+    , fCopyDown   :: Maybe FilePath
     , fRtlConvert :: Bool
     , fSourceName :: Maybe T.Text
     , fWebPort    :: Int
@@ -156,6 +163,7 @@ mbtileOptions =
 webOptions :: Parser CmdLine
 webOptions =
   CmdWebServer <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+              <*> optional (strOption (short 'c' <> long "copy-down" <> metavar "JSFILE" <> help "JSON copydown"))
               <*> switch (long "rtl-convert" <> help "Apply Right-to-left text conversion on metadata (Arabic etc.)")
               <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
               <*> option auto (short 'p' <> long "port" <> help "Web port number")
@@ -273,7 +281,7 @@ dumpPbf style zoom fp = do
       for_ (vtile ^.. layers . traverse) $ \l -> do
           T.putStrLn "-----------------------------"
           T.putStrLn ("Layer: " <> cs (l ^. name))
-          let lfilter = cfExpr (getLayerFilter (l ^. name) cfilters)
+          let lfilter = cfExpr (getLayerFilter False (l ^. name) cfilters)
           for_ (l ^. points) (printCont lfilter Point)
           for_ (l ^. linestrings) (printCont lfilter LineString)
           for_ (l ^. polygons) (printCont lfilter Polygon)
@@ -287,8 +295,19 @@ dumpPbf style zoom fp = do
     printCont lfilter ptype feature = do
       let include = runFilter lfilter ptype feature
       putStrLn $ bool "- " "  " include <> show ptype <> " " <> show (feature ^. metadata)
+      putStrLn $ show (feature ^. geometries)
 
 type JobAction m = ((Zoom, Column, TmsRow, TileId), Maybe TileData) -> m ()
+
+compressParams :: CompressParams
+compressParams = defaultCompressParams{compressLevel=bestCompression}
+
+-- | Return nothing if there are no layers (and therefore no features) on the tile
+checkEmptyTile :: VectorTile -> Maybe VectorTile
+checkEmptyTile t
+  | null (t ^. layers)  = Nothing
+  | otherwise = Just t
+  
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
 runFilterJob ::
@@ -334,23 +353,24 @@ runFilterJob pool mstyle rtlconvert saveAction = do
       liftIO $ CNT.inc counter
       -- We assume the tile exists in the db...
       Just tiledta <- fetchTileTid tileid
-      let tres = case mstyle of
-            Nothing -> Right (Just tiledta)
-            Just style ->
+      newdta <- case mstyle of
+            Nothing -> return (Just tiledta)
+            Just style -> do
+              tdta <- either (liftIO . throwIO . userError . show)
+                             return
+                             (tile (cs (decompress (unTileData tiledta))))          
               let filtList = styleToCFilters z' style
-              in fmap TileData <$> filterTileCs rtlconvert filtList (unTileData tiledta)
-      case tres of
-        Left err -> liftIO $ throwIO (userError (show err))
-        Right newdta -> do
-          liftIO $ whenNothing newdta (CNT.inc emptycnt)
-          -- Check changes
-          changed <- checkHashChanged (z,x,toXyzY y z) newdta
-          if | changed -> do
-                -- Call job action
-                saveAction (pos, newdta)
-                liftIO $ CNT.inc changecnt
-             | otherwise -> liftIO $ CNT.inc skipcnt
-          addHash (z,x,toXyzY y z) newdta
+              let res = filterVectorTile rtlconvert filtList tdta
+              return (TileData . compressWith compressParams . cs . untile <$> checkEmptyTile res)
+      liftIO $ whenNothing newdta (CNT.inc emptycnt)
+      -- Check changes
+      changed <- checkHashChanged (z,x,toXyzY y z) newdta
+      if | changed -> do
+            -- Call job action
+            saveAction (pos, newdta)
+            liftIO $ CNT.inc changecnt
+          | otherwise -> liftIO $ CNT.inc skipcnt
+      addHash (z,x,toXyzY y z) newdta
 
     liftWithPool n f =
       withRunInIO $ \runInIO ->
@@ -470,8 +490,8 @@ makeModtimeStr mtime = do
     return (dbmtime <> "_" <> show stmtime)
 
 -- | Run a web server serving filtered/unfiltered tiles and metadata
-runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> Bool -> FilePath -> IO ()
-runWebServer port mstyle rtlconvert mbpath = do
+runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> Maybe DownCopySpec -> Bool -> FilePath -> IO ()
+runWebServer port mstyle mdownspec rtlconvert mbpath = do
   dbpool <- DP.createPool (SQL.open mbpath) SQL.close 1 100 100
 
   -- Generate a JSON to be included as a metadata file
@@ -496,21 +516,39 @@ runWebServer port mstyle rtlconvert mbpath = do
         setHeader "Content-Type" "application/x-protobuf"
         setHeader "Cache-Control" "max-age=31536000"
 
-        rnewtile <- liftIO $ runMb dbpool $ fetchTileZXY (z, x, tms_y)
+        (rnewtile, duptiles) <- liftIO $ runMb dbpool $ do
+            rnewtile <- fetchTileZXY (z, x, tms_y)
+            duptiles <- case mdownspec of
+                Just spec | spec ^. dDstZoom == unpack z -> do
+                    let newtiles = [((z + 1, 2 * x + Column bx, toTmsY (2 * y + XyzRow by) (z + 1)), (bx, by)) 
+                                    | bx <- [0..1], by <- [0..1]]
+                    mapMaybe (sequenceOf _1) <$> traverseOf (traverse . _1) fetchTileZXY newtiles
+                _ -> return []
+            return (rnewtile, duptiles)
+
         mnewtile <- case rnewtile of
             Just (TileData dta) ->
               case mstyle of
                 Nothing -> return (Just dta)
-                Just (style,_) ->
-                  case filterTile rtlconvert z' style dta of
-                    Left err     -> raise (cs err)
-                    Right newdta -> return newdta
+                Just (style,_) -> do
+                  -- decompress, untile all
+                  (tdta, tuptiles) <- 
+                    case decodeTiles dta duptiles of
+                        Right (tdta, tuptiles) -> return (tdta, tuptiles)
+                        Left err -> raise (cs err)
+                  let res = filterTile rtlconvert z' style (copyDown mdownspec tdta tuptiles)
+                  return (compressWith compressParams . cs . untile <$> checkEmptyTile res)
             _ -> return Nothing
         case mnewtile of
           Just dta -> do
             addHeader "Content-Encoding" "gzip"
             raw dta
           Nothing -> raw "" -- Empty tile
+  where
+    decodeTiles dta duptiles = do
+      t1 <- tile (cs (decompress dta))
+      tlist <- traverseOf (traverse . _1) (tile . cs . decompress . unTileData) duptiles
+      return (t1, tlist)
 
 -- | Read style from filepath, convert 'filter' to newstyle and write to stdout
 runConversion :: FilePath -> IO ()
@@ -535,10 +573,11 @@ main = do
         maxzoom <- getMaxZoom fMbtiles
         style <- getStyle fStyles >>= checkStyle fSourceName maxzoom
         convertMbtiles style fRtlConvert fMbtiles fForceFull
-    CmdWebServer{fModStyles, fWebPort, fMbtiles, fSourceName, fRtlConvert} -> do
+    CmdWebServer{fModStyles, fCopyDown, fWebPort, fMbtiles, fSourceName, fRtlConvert} -> do
         maxzoom <- getMaxZoom fMbtiles
         mstyle <- getMStyle fModStyles fSourceName maxzoom
-        runWebServer fWebPort mstyle fRtlConvert fMbtiles
+        downspec <- readCopyDown fCopyDown
+        runWebServer fWebPort mstyle downspec fRtlConvert fMbtiles
     CmdPublish{fModStyles, fSourceName, fRtlConvert, fPublishOpts} -> do
         maxzoom <- getMaxZoom (pMbtiles fPublishOpts)
         mstyle <- getMStyle fModStyles fSourceName maxzoom
@@ -557,3 +596,11 @@ main = do
         mtimes <- fmap modificationTime <$> traverse getFileStatus stlist
         return (Just (st, maximum mtimes))
     getMStyle _ _ _ = return Nothing
+
+    readCopyDown Nothing = return Nothing
+    readCopyDown (Just fname) = do
+      fspec <- BS.readFile fname
+      case AE.eitherDecodeStrict fspec of
+        Right res -> return res
+        Left err  -> error ("Parsing copydown style failed: " <> err)
+  

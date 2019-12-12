@@ -4,13 +4,9 @@
 -- | Helper module for
 module Mapbox.Filters where
 
-import           Codec.Compression.GZip    (CompressParams (compressLevel),
-                                            bestCompression, compressWith,
-                                            decompress, defaultCompressParams)
 import           Control.Applicative       ((<|>))
 import           Control.Lens              (filtered, over, toListOf, (&), (^.))
 import           Control.Monad.Trans.Class (lift)
-import           Data.Bifunctor            (second)
 import           Data.Bool                 (bool)
 import qualified Data.ByteString.Lazy      as BL
 import qualified Data.HashMap.Strict       as HMap
@@ -22,7 +18,7 @@ import qualified Data.Text                 as T
 import qualified Data.Vector               as V
 import           Geography.VectorTile      (Feature, Layer, VectorTile, layers,
                                             linestrings, metadata, name, points,
-                                            polygons, tile, untile, Val(St))
+                                            polygons, Val(St))
 import Data.Text.ICU.Shape (shapeArabic, ShapeOption(..))
 import Data.Text.ICU.BiDi (reorderParagraphs, WriteOption(..))
 
@@ -43,30 +39,45 @@ type CFilters = HMap.HashMap BL.ByteString CFilter
 
 -- | Return a filter from the CFilters map
 -- If the layer does not have a record in CFilters, it will be filtered out
-getLayerFilter :: BL.ByteString -> CFilters -> CFilter
-getLayerFilter lname layerFilters =
-  fromMaybe (CFilter (return False) mempty) (HMap.lookup lname layerFilters)
+getLayerFilter :: Bool -> BL.ByteString -> CFilters -> CFilter
+getLayerFilter defval lname layerFilters =
+  fromMaybe (CFilter (return defval) mempty) (HMap.lookup lname layerFilters)
+
+
+simpleFilter' :: Bool -> CFilters -> VectorTile -> VectorTile
+simpleFilter' defval layerFilters = over (layers . traverse) runLayerFilter
+  where
+    runLayerFilter :: Layer -> Layer
+    runLayerFilter l =
+      let lfilter = getLayerFilter defval (l ^. name) layerFilters
+      in l & over points (V.filter (runFilter (cfExpr lfilter) Point))
+           & over linestrings (V.filter (runFilter (cfExpr lfilter) LineString))
+           & over polygons (V.filter (runFilter (cfExpr lfilter) Polygon))
+
+simpleFilter :: CFilters -> VectorTile -> VectorTile
+simpleFilter = simpleFilter' False
+
+simpleNegFilter :: CFilters -> VectorTile -> VectorTile
+simpleNegFilter layerFilters = simpleFilter' True (fmap negFilters layerFilters)
+  where
+    negFilters (CFilter flt meta) = CFilter (not <$> flt) meta
 
 -- | Entry is list of layers with filter (non-existent filter should be replaced with 'return True')
 -- Returns nothing if the resulting tile is empty
-filterVectorTile :: Bool -> CFilters -> VectorTile -> Maybe VectorTile
+filterVectorTile :: Bool -> CFilters -> VectorTile -> VectorTile
 filterVectorTile rtlconvert layerFilters =
-    checkEmptyTile . over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runLayerFilter
+    over layers (HMap.filter (not . nullLayer)) . over (layers . traverse) runMetaFilter . simpleFilter layerFilters
   where
-    -- Return nothing if there are no layers (and therefore no features) on the tile
-    checkEmptyTile t | null (t ^. layers)  = Nothing
-                     | otherwise = Just t
-
     nullLayer l = null (l ^. points)
                   && null (l ^. linestrings)
                   && null (l ^. polygons)
 
-    runLayerFilter :: Layer -> Layer
-    runLayerFilter l =
-      let lfilter = getLayerFilter (l ^. name) layerFilters
-      in l & over points (fmap (clearMeta lfilter) . V.filter (runFilter (cfExpr lfilter) Point))
-           & over linestrings (fmap (clearMeta lfilter) . V.filter (runFilter (cfExpr lfilter) LineString))
-           & over polygons (fmap (clearMeta lfilter) . V.filter (runFilter (cfExpr lfilter) Polygon))
+    runMetaFilter :: Layer -> Layer
+    runMetaFilter l =
+      let lfilter = getLayerFilter False (l ^. name) layerFilters
+      in l & over points (fmap (clearMeta lfilter))
+           & over linestrings (fmap (clearMeta lfilter))
+           & over polygons (fmap (clearMeta lfilter))
 
     clearMeta :: CFilter -> Feature a -> Feature a
     clearMeta cf = over metadata (fmap stringConversion . HMap.filterWithKey (\k _ -> k `elem` cfMeta cf))
@@ -110,16 +121,6 @@ styleToCFilters zoom =
     zoomMaxOk Nothing     = True
     zoomMaxOk (Just maxz) = zoom <= maxz
 
--- | Decode, filter, encode based on CFilters map
-filterTileCs :: Bool -> CFilters -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
-filterTileCs rtlconvert cstyles dta =
-    second doFilterTile (tile (cs (decompress dta)))
-  where
-    doFilterTile tl = compressWith compressParams . cs . untile <$> filterVectorTile rtlconvert cstyles tl
-    -- | Default compression settings
-    compressParams = defaultCompressParams{compressLevel=bestCompression}
-
 -- | Decode, filter, encode based on zoom level and mapbox style
-filterTile :: Bool -> Int -> MapboxStyle -> BL.ByteString -> Either T.Text (Maybe BL.ByteString)
-filterTile rtlconvert z style = filterTileCs rtlconvert (styleToCFilters z style)
-
+filterTile :: Bool -> Int -> MapboxStyle -> VectorTile -> VectorTile
+filterTile rtlconvert z style = filterVectorTile rtlconvert (styleToCFilters z style)
