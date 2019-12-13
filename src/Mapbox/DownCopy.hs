@@ -60,8 +60,8 @@ copyDown (Just fspec) dsttile srcTiles =
       over (layers . traverse) (applyOperation (dx, dy)) vtile
 
     applyOperation (dx, dy) layer =
-      let ext = layer ^. extent -- tile square size
-          op (Point x y) = Point ((dx * fromIntegral ext + x) `div` 2) ((dy * fromIntegral ext + y) `div` 2)
+      let ext = fromIntegral (layer ^. extent) -- tile square size
+          op (Point x y) = Point ((dx * ext + x) `div` 2) ((dy * ext + y) `div` 2)
       in layer & points %~ over (traverse . geometries) (VS.map op)
                & linestrings %~ over (traverse . geometries . traverse) (applyLine op)
                & polygons %~ over (traverse . geometries . traverse) (applyPolygon op)
