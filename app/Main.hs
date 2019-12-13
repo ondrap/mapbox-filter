@@ -133,6 +133,7 @@ data CmdLine =
   }
   | CmdPublish {
       fModStyles   :: [FilePath]
+    , fCopyDown   :: Maybe FilePath
     , fRtlConvert :: Bool
     , fSourceName  :: Maybe T.Text
     , fPublishOpts :: PublishOpts
@@ -185,6 +186,7 @@ publishOptions :: Parser CmdLine
 publishOptions =
   CmdPublish
     <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
+    <*> optional (strOption (short 'c' <> long "copy-down" <> metavar "JSFILE" <> help "JSON copydown"))
     <*> switch (long "rtl-convert" <> help "Apply Right-to-left text conversion on metadata (Arabic etc.)")
     <*> optional (strOption (short 's' <> long "source" <> help "Tile source name from mapbox style"))
     <*> (PublishOpts <$>
@@ -196,8 +198,6 @@ publishOptions =
       <*> optional (strOption (long "hashes-db" <> metavar "SQLITE" <> help "Old hashes.db for differential upload"))
       <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
     )
-
-
 
 cmdLineParser  :: Parser CmdLine
 cmdLineParser =
@@ -314,10 +314,11 @@ runFilterJob ::
     forall m. (HasMbConn m, HasJobConn m, MonadUnliftIO m, MonadFail m, HasMd5Queue m)
   => Pool -- ^ Threadpool for parallel processing
   -> Maybe MapboxStyle -- ^ Filtering mapboxstyle
+  -> Maybe DownCopySpec
   -> Bool -- ^ If true, convert right-to-left texts
   -> JobAction m -- ^ Action to perform on filtered tile
   -> m ()
-runFilterJob pool mstyle rtlconvert saveAction = do
+runFilterJob pool mstyle mdownspec rtlconvert saveAction = do
     total_count <- getIncompleteCount
     liftIO $ putStrLn ("Remaining tiles: " <> show total_count)
     counter <- liftIO CNT.new -- TODO - take complete count from the job file...
@@ -353,14 +354,19 @@ runFilterJob pool mstyle rtlconvert saveAction = do
       liftIO $ CNT.inc counter
       -- We assume the tile exists in the db...
       Just tiledta <- fetchTileTid tileid
+      -- Fetch downcopy tiles
+      duptiles <- fetchDownTiles mdownspec (z, x, toXyzY y z)
+
       newdta <- case mstyle of
             Nothing -> return (Just tiledta)
             Just style -> do
-              tdta <- either (liftIO . throwIO . userError . show)
-                             return
-                             (tile (cs (decompress (unTileData tiledta))))          
+              (tdta, tuptiles) <- 
+                case parseTiles (unTileData tiledta) duptiles of
+                    Right (tdta, tuptiles) -> return (tdta, tuptiles)
+                    Left err -> liftIO . throwIO . userError . show $ err
+
               let filtList = styleToCFilters z' style
-              let res = filterVectorTile rtlconvert filtList tdta
+              let res = filterVectorTile rtlconvert filtList (copyDown mdownspec tdta tuptiles)
               return (TileData . compressWith compressParams . cs . untile <$> checkEmptyTile res)
       liftIO $ whenNothing newdta (CNT.inc emptycnt)
       -- Check changes
@@ -403,7 +409,7 @@ runFilterJob pool mstyle rtlconvert saveAction = do
 convertMbtiles :: MapboxStyle -> Bool -> FilePath -> Bool -> IO ()
 convertMbtiles style rtlconvert mbtiles force = do
   runSingleDb force mbtiles (mbtiles <> ".filter") $ do
-    runFilterJob globalPool (Just style) rtlconvert (uncurry updateMbtile)
+    runFilterJob globalPool (Just style) Nothing rtlconvert (uncurry updateMbtile)
     -- If we were shrinking, call vacuum on database
     vacuumDb
   stopGlobalPool
@@ -411,10 +417,12 @@ convertMbtiles style rtlconvert mbtiles force = do
 -- | Publish the mbtile to an S3 target, make it ready for serving
 runPublishJob ::
      Maybe (MapboxStyle, EpochTime) -- ^ Parsed style + modification time of the style
+  -> Maybe DownCopySpec
   -> Bool
   -> PublishOpts
   -> IO ()
-runPublishJob mstyle rtlconvert PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint, pDiffHashes} = do
+runPublishJob mstyle mdownspec rtlconvert 
+      PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint, pDiffHashes} = do
   -- Create http connection manager with higher limits
   conncount <- maybe getNumCapabilities return pThreads
   manager <- newManager tlsManagerSettings{managerConnCount=conncount, managerIdleConnectionCount=conncount}
@@ -438,7 +446,7 @@ runPublishJob mstyle rtlconvert PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUr
       , pOldMd5Path = pDiffHashes
     }
     runParallelDb pConf pForceFull dbpool $ do
-      runFilterJob pool (fst <$> mstyle) rtlconvert $ \((z,x,y,_), mnewdta) ->
+      runFilterJob pool (fst <$> mstyle) mdownspec rtlconvert $ \((z,x,y,_), mnewdta) ->
         liftIO $ do
           let dstpath = "tiles/" <> mkPath (z,x,y)
           -- Skip empty tiles
@@ -489,6 +497,13 @@ makeModtimeStr mtime = do
     let stmtime = fromMaybe 0 mtime
     return (dbmtime <> "_" <> show stmtime)
 
+fetchDownTiles :: HasMbConn m => Maybe DownCopySpec -> (Zoom, Column, XyzRow) -> m [(TileData, (Int, Int))]
+fetchDownTiles (Just spec) (z, x, y) | spec ^. dDstZoom == unpack z = do
+  let newtiles = [((z + 1, 2 * x + Column bx, toTmsY (2 * y + XyzRow by) (z + 1)), (bx, by)) 
+                  | bx <- [0..1], by <- [0..1]]
+  mapMaybe (sequenceOf _1) <$> traverseOf (traverse . _1) fetchTileZXY newtiles
+fetchDownTiles _ _ = return []
+
 -- | Run a web server serving filtered/unfiltered tiles and metadata
 runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> Maybe DownCopySpec -> Bool -> FilePath -> IO ()
 runWebServer port mstyle mdownspec rtlconvert mbpath = do
@@ -518,12 +533,7 @@ runWebServer port mstyle mdownspec rtlconvert mbpath = do
 
         (rnewtile, duptiles) <- liftIO $ runMb dbpool $ do
             rnewtile <- fetchTileZXY (z, x, tms_y)
-            duptiles <- case mdownspec of
-                Just spec | spec ^. dDstZoom == unpack z -> do
-                    let newtiles = [((z + 1, 2 * x + Column bx, toTmsY (2 * y + XyzRow by) (z + 1)), (bx, by)) 
-                                    | bx <- [0..1], by <- [0..1]]
-                    mapMaybe (sequenceOf _1) <$> traverseOf (traverse . _1) fetchTileZXY newtiles
-                _ -> return []
+            duptiles <- fetchDownTiles mdownspec (z, x, y)
             return (rnewtile, duptiles)
 
         mnewtile <- case rnewtile of
@@ -533,7 +543,7 @@ runWebServer port mstyle mdownspec rtlconvert mbpath = do
                 Just (style,_) -> do
                   -- decompress, untile all
                   (tdta, tuptiles) <- 
-                    case decodeTiles dta duptiles of
+                    case parseTiles dta duptiles of
                         Right (tdta, tuptiles) -> return (tdta, tuptiles)
                         Left err -> raise (cs err)
                   let res = filterTile rtlconvert z' style (copyDown mdownspec tdta tuptiles)
@@ -544,11 +554,13 @@ runWebServer port mstyle mdownspec rtlconvert mbpath = do
             addHeader "Content-Encoding" "gzip"
             raw dta
           Nothing -> raw "" -- Empty tile
-  where
-    decodeTiles dta duptiles = do
-      t1 <- tile (cs (decompress dta))
-      tlist <- traverseOf (traverse . _1) (tile . cs . decompress . unTileData) duptiles
-      return (t1, tlist)
+
+-- | Parses tiles from a bytestring
+parseTiles :: BL8.ByteString -> [(TileData, (Int, Int))] -> Either T.Text (VectorTile, [(VectorTile, (Int, Int))])
+parseTiles dta duptiles = do
+  t1 <- tile (cs (decompress dta))
+  tlist <- traverseOf (traverse . _1) (tile . cs . decompress . unTileData) duptiles
+  return (t1, tlist)
 
 -- | Read style from filepath, convert 'filter' to newstyle and write to stdout
 runConversion :: FilePath -> IO ()
@@ -578,10 +590,11 @@ main = do
         mstyle <- getMStyle fModStyles fSourceName maxzoom
         downspec <- readCopyDown fCopyDown
         runWebServer fWebPort mstyle downspec fRtlConvert fMbtiles
-    CmdPublish{fModStyles, fSourceName, fRtlConvert, fPublishOpts} -> do
+    CmdPublish{fModStyles, fCopyDown, fSourceName, fRtlConvert, fPublishOpts} -> do
         maxzoom <- getMaxZoom (pMbtiles fPublishOpts)
         mstyle <- getMStyle fModStyles fSourceName maxzoom
-        runPublishJob mstyle fRtlConvert fPublishOpts
+        downspec <- readCopyDown fCopyDown
+        runPublishJob mstyle downspec fRtlConvert fPublishOpts
     CmdConvert{fStyle} -> runConversion fStyle
   where
     -- We need to adjust minZoom in the styles to be at least the maximum zoom level
