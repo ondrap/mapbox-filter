@@ -164,7 +164,7 @@ mbtileOptions =
 webOptions :: Parser CmdLine
 webOptions =
   CmdWebServer <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
-              <*> optional (strOption (short 'c' <> long "copy-down" <> metavar "JSFILE" <> help "JSON copydown"))
+              <*> optional (strOption (short 'c' <> long "copy-down" <> metavar "JSFILE" <> help "JSON copydown specification"))
               <*> switch (long "rtl-convert" <> help "Apply Right-to-left text conversion on metadata (Arabic etc.)")
               <*> optional (strOption (short 's' <> long "source" <> help "Tile source name"))
               <*> option auto (short 'p' <> long "port" <> help "Web port number")
@@ -186,7 +186,7 @@ publishOptions :: Parser CmdLine
 publishOptions =
   CmdPublish
     <$> many (strOption (short 'j' <> long "style" <> metavar "JSFILE" <> help "JSON mapbox style file"))
-    <*> optional (strOption (short 'c' <> long "copy-down" <> metavar "JSFILE" <> help "JSON copydown"))
+    <*> optional (strOption (short 'c' <> long "copy-down" <> metavar "JSFILE" <> help "JSON copydown specification"))
     <*> switch (long "rtl-convert" <> help "Apply Right-to-left text conversion on metadata (Arabic etc.)")
     <*> optional (strOption (short 's' <> long "source" <> help "Tile source name from mapbox style"))
     <*> (PublishOpts <$>

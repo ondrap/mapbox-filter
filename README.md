@@ -40,6 +40,32 @@ A special version of `text-icu` library is required. Everything should work corr
 with stack, cabal users need to look into the `stack.yaml` file and install the library
 manually.
 
+## Moving data from a zoom-level down
+
+Sometimes it might be desirable to move some data from a higher zoom-level to a lower zoom-level.
+The `copy-down` function replaces all data that is matched by the filter from the 
+destination zoom level with data form one level up. In the following example,
+the river data is moved from zoom 9 to zoom 8. 
+
+```
+{
+  "dst-zoom": 8,
+  "source-layer": "waterway", 
+  "filter": [
+    "all",
+    ["==", ["geometry-type"], "LineString"],
+    ["!=", ["string", ["get", "class"]], "stream"],
+    [
+      "match",
+      ["string", ["get", "brunnel"], ""],
+      ["tunnel", "bridge"],
+      false,
+      true
+    ]
+  ]
+}
+```
+
 ## Examples
 
 Show CLI help:
