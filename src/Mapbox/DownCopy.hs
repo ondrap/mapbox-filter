@@ -5,7 +5,7 @@
 
 module Mapbox.DownCopy where
 
-import           Control.Lens             ((&), (^.), (%~), makeLenses, over, _1)
+import           Control.Lens             ((&), (^.), (%~), makeLenses, over, _1, (.~))
 import           Data.List                (foldl')
 import           Data.Aeson               (FromJSON (..), (.:))
 import qualified Data.Aeson               as AE
@@ -15,9 +15,11 @@ import qualified Data.HashMap.Strict      as HMap
 import           Geography.VectorTile      (VectorTile(..),
                                             linestrings, points,
                                             polygons, Point(..), geometries, layers,
-                                            LineString(..), Polygon(..), extent)
+                                            LineString(..), Polygon(..), extent,
+                                            featureId)
 import Data.String.Conversions.Monomorphic (fromST)
 import qualified Data.Vector.Storable as VS
+import qualified Data.Vector          as V
 
 import Mapbox.Filters (CFilters, simpleFilter, CFilter(..), simpleNegFilter)
 import           Mapbox.Interpret         (CompiledExpr, compileExpr)
@@ -69,6 +71,11 @@ copyDown (Just fspec) dsttile srcTiles =
     
     -- Merge 2 tiles into one
     mergeTile (VectorTile _l1) (VectorTile _l2) = VectorTile (HMap.unionWith mergeLayer _l1 _l2)
-    mergeLayer l1 l2 = l1 & points %~ (<> l2 ^. points)
-                          & linestrings %~ (<> l2 ^. linestrings)
-                          & polygons %~ (<> l2 ^. polygons)
+    mergeLayer l1 l2 = l1 & points %~ (`addAndRenumber` (l2 ^. points))
+                          & linestrings %~ (`addAndRenumber` (l2 ^. linestrings))
+                          & polygons %~ (`addAndRenumber` (l2 ^. polygons))
+    addAndRenumber l1 l2
+      | V.null l2 = l1
+      | otherwise = V.fromListN (V.length l1 + V.length l2) 
+                                (zipWith (\idx f -> f & featureId .~ idx) 
+                                         [1..] (V.toList l1 <> V.toList l2))

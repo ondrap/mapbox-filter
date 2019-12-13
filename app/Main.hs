@@ -52,7 +52,8 @@ import qualified Database.SQLite.Simple               as SQL
 import           Geography.VectorTile                 (layers, linestrings,
                                                        metadata, name, points,
                                                        polygons, tile, untile,
-                                                       VectorTile, geometries)
+                                                       VectorTile,
+                                                       featureId)
 import           Network.AWS                          (AccessKey (..), Credentials (Discover, FromKeys),
                                                        SecretKey (..),
                                                        configure, envManager,
@@ -294,8 +295,8 @@ dumpPbf style zoom fp = do
 
     printCont lfilter ptype feature = do
       let include = runFilter lfilter ptype feature
-      putStrLn $ bool "- " "  " include <> show ptype <> " " <> show (feature ^. metadata)
-      putStrLn $ show (feature ^. geometries)
+      putStrLn $ bool "- " "  " include <> " " <> show (feature ^. featureId) <> " " <> show ptype <> " " <> show (HMap.toList (feature ^. metadata))
+      -- putStrLn $ show (feature ^. geometries)
 
 type JobAction m = ((Zoom, Column, TmsRow, TileId), Maybe TileData) -> m ()
 
@@ -360,12 +361,9 @@ runFilterJob pool mstyle mdownspec rtlconvert saveAction = do
       newdta <- case mstyle of
             Nothing -> return (Just tiledta)
             Just style -> do
-              (tdta, tuptiles) <- 
-                case parseTiles (unTileData tiledta) duptiles of
-                    Right (tdta, tuptiles) -> return (tdta, tuptiles)
-                    Left err -> liftIO . throwIO . userError . show $ err
-
               let filtList = styleToCFilters z' style
+              let generr = liftIO . throwIO . userError . show
+              (tdta, tuptiles) <- either generr return (parseTiles (unTileData tiledta) duptiles)
               let res = filterVectorTile rtlconvert filtList (copyDown mdownspec tdta tuptiles)
               return (TileData . compressWith compressParams . cs . untile <$> checkEmptyTile res)
       liftIO $ whenNothing newdta (CNT.inc emptycnt)
@@ -541,11 +539,7 @@ runWebServer port mstyle mdownspec rtlconvert mbpath = do
               case mstyle of
                 Nothing -> return (Just dta)
                 Just (style,_) -> do
-                  -- decompress, untile all
-                  (tdta, tuptiles) <- 
-                    case parseTiles dta duptiles of
-                        Right (tdta, tuptiles) -> return (tdta, tuptiles)
-                        Left err -> raise (cs err)
+                  (tdta, tuptiles) <- either (raise .cs) return (parseTiles dta duptiles)
                   let res = filterTile rtlconvert z' style (copyDown mdownspec tdta tuptiles)
                   return (compressWith compressParams . cs . untile <$> checkEmptyTile res)
             _ -> return Nothing
