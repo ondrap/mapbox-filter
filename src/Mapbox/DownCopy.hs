@@ -45,12 +45,10 @@ mkCFilters fspec = HMap.singleton (fspec ^. dSourceLayer) (CFilter (fspec ^. dFi
 
 copyDown :: Maybe DownCopySpec -> VectorTile -> [(VectorTile, (Int, Int))] -> VectorTile
 copyDown _ mtile [] = mtile
--- copyDown _ _ [] = VectorTile mempty
 copyDown Nothing mtile _ = mtile
 copyDown (Just fspec) dsttile srcTiles =
     let fltdst = simpleNegFilter lfilters dsttile
         fltsrc = map shrinkTile . over (traverse . _1) (simpleFilter lfilters) $ srcTiles
-    -- in foldl1 mergeTile fltsrc
     in foldl' mergeTile fltdst fltsrc
   where
     lfilters = mkCFilters fspec
