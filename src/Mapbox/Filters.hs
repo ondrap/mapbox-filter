@@ -12,7 +12,6 @@ import qualified Data.ByteString.Lazy      as BL
 import qualified Data.HashMap.Strict       as HMap
 import qualified Data.HashSet              as HSet
 import           Data.Maybe                (fromMaybe)
-import           Data.Semigroup            ((<>))
 import           Data.String.Conversions   (cs)
 import qualified Data.Text                 as T
 import qualified Data.Vector               as V

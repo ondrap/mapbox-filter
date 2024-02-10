@@ -22,10 +22,9 @@ module Mapbox.Expression (
 
 import           Control.Monad            ((>=>))
 import           Data.Bool                (bool)
-import           Data.Functor.Foldable    (Fix (..))
+import           Data.Fix    (Fix (..))
 import qualified Data.HashMap.Strict      as HMap
 import           Data.Maybe               (isJust)
-import           Data.Monoid              ((<>))
 import           Data.Scientific          (Scientific)
 import           Data.String.Conversions  (cs)
 import qualified Data.Text                as T

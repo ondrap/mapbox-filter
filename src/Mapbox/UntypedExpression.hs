@@ -1,16 +1,17 @@
 {-# LANGUAGE DeriveFunctor        #-}
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE OverloadedStrings    #-}
-{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Untyped expression parser for the mapbox style expressions
 module Mapbox.UntypedExpression where
 
 import           Control.Applicative   ((<|>))
-import           Data.Aeson            (FromJSON (..), (.:?))
+import           Data.Aeson            ((.:?))
 import qualified Data.Aeson            as AE
 import           Data.Functor.Classes
-import           Data.Functor.Foldable
+import Data.Fix (Fix(..))
 import           Data.Scientific       (Scientific)
 import qualified Data.Text             as T
 import qualified Data.Vector           as V
@@ -47,41 +48,35 @@ instance Show1 UExpF where
       . mconcat (map (\l -> showChar ' ' . sp 11 l) lst)
   liftShowsPrec _ _ d (UFunction pid) = showParen (d > 10) $ showString "UFunction " . showsPrec 11 pid
 
-instance FromJSON UExp where
-  parseJSON (AE.String str) = return (Fix (UStr str))
-  parseJSON (AE.Number num) = return (Fix (UNum num))
-  parseJSON (AE.Bool b) = return (Fix (UBool b))
-  parseJSON AE.Null = fail "Null not supported as expression"
-  parseJSON (AE.Object o) = do
-      prop <- o .:? "property"
-      return (Fix (UFunction prop))
-  parseJSON (AE.Array arr) = numarr <|> expr
+
+instance AE.FromJSON1 UExpF where
+  liftParseJSON parse _ = uparse
     where
-      numarr = Fix . UNumArr <$> traverse AE.parseJSON arr
-      expr | (idn:iargs) <- V.toList arr = do
-                    fid <- AE.parseJSON idn
-                    case fid of
-                      "let" -> letexpr iargs
-                      "var" -> varexpr iargs
-                      "match" -> matchexpr iargs
-                      _     -> Fix . UApp fid <$> traverse AE.parseJSON iargs
-           | otherwise = fail "Empty array not supported"
-      letexpr (AE.String vname : val : rest) = do
-          uval <- parseJSON val
-          next <- letexpr rest
-          return (Fix (ULet vname uval next))
-      letexpr [e] = parseJSON e
-      letexpr _ = fail "Invalid let expression"
-      varexpr [AE.String nm] = return (Fix (UVar nm))
-      varexpr _              = fail "Invalid var expression"
-      -- We have to parse 'match' separately, as it has different types on 'label' - only literal/array of literal allowed
-      -- every other is special
-      matchexpr args = Fix . UApp "match" <$> traverse parseMatchArg (zip (cycle [False, True]) args)
-      parseMatchArg (True, arg) = 
-          Fix <$> ((UStrArr <$> AE.parseJSON arg)
-                  <|> (UNumArr <$> AE.parseJSON arg)
-                  <|> (UNum <$> AE.parseJSON arg)
-                  <|> (UStr <$> AE.parseJSON arg)
-                  <|> (UBool <$> AE.parseJSON arg)
-          )
-      parseMatchArg (False, arg) = AE.parseJSON arg
+      uparse (AE.String str) = return (UStr str)
+      uparse (AE.Number num) = return (UNum num)
+      uparse (AE.Bool b) = return (UBool b)
+      uparse AE.Null = fail "Null not supported as expression"
+      uparse (AE.Object o) = do
+          prop <- o .:? "property"
+          return (UFunction prop)
+      uparse (AE.Array arr) = numarr <|> expr
+        where
+          numarr = UNumArr <$> traverse AE.parseJSON arr
+
+          expr | (idn:iargs) <- V.toList arr = do
+                        fid <- AE.parseJSON idn
+                        case (fid :: T.Text) of
+                          "let" -> letexpr iargs
+                          "var" -> varexpr iargs
+                          "match" -> matchexpr iargs
+                          _     -> UApp fid <$> traverse parse iargs
+              | otherwise = fail "Empty array not supported"
+
+          letexpr [AE.String vname, val, rest] = do
+              uval <- parse val
+              next <- parse rest
+              return (ULet vname uval next)
+          letexpr _ = fail "Invalid let expression"
+          varexpr [AE.String nm] = return (UVar nm)
+          varexpr _              = fail "Invalid var expression"
+          matchexpr args = UApp "match" <$> traverse parse args

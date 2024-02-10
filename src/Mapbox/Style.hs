@@ -9,16 +9,16 @@ import           Control.Lens             (makeLenses, makePrisms, (^.))
 import           Data.Aeson               (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson               as AE
 import qualified Data.ByteString.Lazy     as BL
-import           Data.Functor.Foldable    (Fix (..), para)
+import           Data.Functor.Foldable    (para)
 import qualified Data.HashMap.Strict      as HMap
 import qualified Data.HashSet             as HSet
-import           Data.Semigroup           (Semigroup (..))
 import           Data.String.Conversions  (cs)
 import qualified Data.Text                as T
 
 import           Mapbox.Expression        (UExp, typeCheckFilter)
 import           Mapbox.Interpret         (CompiledExpr, compileExpr)
 import           Mapbox.UntypedExpression (UExpF (..))
+import Data.Fix (Fix(..))
 
 data VectorLayer = VectorLayer {
     _lSource      :: T.Text
@@ -81,7 +81,7 @@ instance FromJSON Layer where
         _lMaxZoom <- o .:? "maxzoom"
         _lSource <- o .: "source"
         _lSourceLayer <- o .: "source-layer"
-        flt <- o .:? "filter"
+        flt :: Maybe UExp <- o .:? "filter"
         -- Directly typecheck and compile filter
         _lFilter <- case flt of
             Nothing   -> return Nothing

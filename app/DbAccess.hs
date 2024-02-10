@@ -11,12 +11,10 @@ module DbAccess where
 
 import           Control.Exception.Safe         (MonadThrow, catchAny, throwIO)
 import           Control.Monad                  (void, when)
-import           Control.Monad.Fail             (MonadFail (..))
 import           Control.Monad.IO.Class         (MonadIO, liftIO)
 import           Control.Monad.Reader           (MonadReader, ReaderT (..), ask,
                                                  asks, runReaderT)
 import           Data.Maybe                     (fromMaybe)
-import           Data.Monoid                    ((<>))
 import qualified Data.Pool                      as DP
 import qualified Data.Text                      as T
 import           Database.SQLite.Simple         (Connection, Only (..),
@@ -26,8 +24,7 @@ import           Database.SQLite.Simple         (Connection, Only (..),
 import           Database.SQLite.Simple.FromRow (FromRow (..))
 import           Database.SQLite.Simple.ToField (ToField (..))
 import           Database.SQLite.Simple.ToRow   (ToRow (..))
-import           UnliftIO                       (MonadUnliftIO (..),
-                                                 UnliftIO (..), withUnliftIO)
+import           UnliftIO                       (MonadUnliftIO (..))
 
 import           Md5Worker
 import           Types
@@ -189,10 +186,6 @@ runSingleDb forceFull mbpath jobpath (SingleDbRunner code) =
       runReaderT code (SingleEnv mbconn jobconn)
 
 instance MonadUnliftIO SingleDbRunner where
-  askUnliftIO =
-    SingleDbRunner . ReaderT $ \r ->
-      withUnliftIO $ \u ->
-        return (UnliftIO (unliftIO u . flip runReaderT r . unSingleDbRunner))
   withRunInIO inner =
     SingleDbRunner . ReaderT $ \r ->
       withRunInIO $ \run ->
@@ -226,10 +219,6 @@ newtype MbRunner m a = MbRunner {
 deriving instance Monad m => MonadReader (DP.Pool Connection) (MbRunner m)
 
 instance MonadUnliftIO m => MonadUnliftIO (MbRunner m) where
-  askUnliftIO =
-    MbRunner . ReaderT $ \r ->
-      withUnliftIO $ \u ->
-        return (UnliftIO (unliftIO u . flip runReaderT r . unMbRunner))
   withRunInIO inner =
     MbRunner . ReaderT $ \r ->
       withRunInIO $ \run ->
@@ -259,10 +248,6 @@ newtype ParallelDbRunner a = ParallelDbRunner {
 deriving instance MonadReader ParallelEnv ParallelDbRunner
 
 instance MonadUnliftIO ParallelDbRunner where
-  askUnliftIO =
-    ParallelDbRunner . ReaderT $ \r ->
-      withUnliftIO $ \u ->
-        return (UnliftIO (unliftIO u . flip runReaderT r . unParallelDbRunner))
   withRunInIO inner =
     ParallelDbRunner . ReaderT $ \r ->
       withRunInIO $ \run ->

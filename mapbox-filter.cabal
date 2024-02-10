@@ -27,7 +27,7 @@ library
     , vectortiles >= 1.4.0
     , bytestring
     , unordered-containers
-    , aeson
+    , aeson >= 2.1
     , scientific
     , text
     , vector
@@ -37,6 +37,7 @@ library
     , zlib
     , recursion-schemes
     , text-icu
+    , data-fix
   exposed-modules:
       Mapbox.Expression
       Mapbox.Style
@@ -73,7 +74,7 @@ executable mapbox-filter
     , unix
     , scotty
     , safe-exceptions
-    , amazonka
+    , amazonka >= 2.0
     , amazonka-s3
     , ekg-core
     , async

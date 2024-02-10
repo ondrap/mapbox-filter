@@ -1,4 +1,3 @@
-{-# LANGUAGE MultiWayIf          #-}
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -18,12 +17,11 @@ import           Control.Concurrent.ParallelIO.Global (globalPool,
 import           Control.Concurrent.ParallelIO.Local  (Pool, parallel_,
                                                        withPool)
 import           Control.Exception.Safe               (bracket, throwIO)
-import           Control.Lens                         (over, (%~), (&), (.~),
-                                                       (<&>), (?~), (^.), (^..),
+import           Control.Lens                         (over, (%~), (&),
+                                                       (<&>), (^.), (^..),
                                                        (^?), _Just, traverseOf, _1, sequenceOf)
 import           Control.Monad                        (forever, unless, void,
                                                        when)
-import           Control.Monad.Fail                   (MonadFail (..))
 import           Control.Monad.IO.Class               (liftIO)
 import           Data.Aeson                           ((.=))
 import qualified Data.Aeson                           as AE
@@ -39,7 +37,7 @@ import           Data.List                            (nub)
 import           Data.List.NonEmpty                   (NonEmpty, nonEmpty)
 import           Data.Maybe                           (fromMaybe, mapMaybe)
 import qualified Data.Pool                            as DP
-import           Data.Semigroup                       (sconcat, (<>))
+import           Data.Semigroup                       (sconcat)
 import           Data.String.Conversions              (cs)
 import           Control.Newtype                      (Newtype(unpack))
 import qualified Data.Text                            as T
@@ -54,19 +52,13 @@ import           Geography.VectorTile                 (layers, linestrings,
                                                        polygons, tile, untile,
                                                        VectorTile,
                                                        featureId)
-import           Network.AWS                          (AccessKey (..), Credentials (Discover, FromKeys),
+import           Amazonka                         (AccessKey (..),
                                                        SecretKey (..),
-                                                       configure, envManager,
-                                                       newEnv, runAWS,
                                                        runResourceT, send,
-                                                       setEndpoint, toBody)
-import           Network.AWS.S3                       (BucketName (..),
-                                                       ObjectKey (..),
-                                                       deleteObject,
-                                                       poCacheControl,
-                                                       poContentEncoding,
-                                                       poContentType, putObject,
-                                                       s3)
+                                                       setEndpoint, toBody, configureService, discover, newEnvFromManager)
+import           Amazonka.S3                       (BucketName (..),
+                                                       ObjectKey (..), newDeleteObject, newPutObject)
+import Amazonka.S3.PutObject (PutObject(contentType, contentEncoding, cacheControl))
 import           Network.HTTP.Client                  (managerConnCount, managerIdleConnectionCount,
                                                        newManager)
 import           Network.HTTP.Client.TLS              (tlsManagerSettings)
@@ -83,8 +75,8 @@ import           Text.Read                            (readMaybe)
 import           UnliftIO                             (MonadUnliftIO, catchAny,
                                                        race_, withRunInIO)
 import           Web.Scotty                           (addHeader, get, header,
-                                                       json, param, raise, raw,
-                                                       scotty, setHeader)
+                                                       json, raw,
+                                                       scotty, setHeader, pathParam)
 
 import           DbAccess
 import           Mapbox.Filters
@@ -96,6 +88,10 @@ import           Mapbox.Style                         (MapboxStyle, lMinZoom,
 import           Mapbox.OldStyleConvert               (convertToNew)
 import           Mapbox.DownCopy                      (DownCopySpec, dDstZoom, copyDown)
 import           Types
+import qualified Amazonka.S3 as S3
+import Amazonka.Auth (fromKeys)
+import qualified Data.Aeson.KeyMap as AEK
+import qualified Data.Aeson.Key as AEK
 
 data PublishTarget = PublishFs FilePath | PublishS3 BucketName
   deriving (Show)
@@ -247,7 +243,7 @@ genMetadata :: (Monad m, HasMbConn m) => TL.Text -> TL.Text -> m AE.Value
 genMetadata modTimeStr urlPrefix = do
     metalines <- getMetaData
     return $ AE.object $
-        concatMap addMetaLine metalines
+        concatMap addMetaLine (over (traverse . _1) AEK.fromText metalines)
         ++ ["tiles" .= [urlPrefix <> "/tiles/{z}/{x}/{y}?" <> modTimeStr],
             "tilejson" .= ("2.0.0" :: T.Text)
             ]
@@ -259,7 +255,7 @@ genMetadata modTimeStr urlPrefix = do
         Just (dnum :: Int) <- readMaybe val =
             [key .= dnum]
       | key == "json", Just (AE.Object obj) <- AE.decode (cs val) =
-            HMap.toList obj
+            AEK.toList obj
       | key == "center", Just (lst :: [Double]) <- decodeArr val =
           [key .= lst]
       | key == "bounds", Just lst@[_ :: Double, _,_,_] <- decodeArr val =
@@ -369,11 +365,11 @@ runFilterJob pool mstyle mdownspec rtlconvert saveAction = do
       liftIO $ whenNothing newdta (CNT.inc emptycnt)
       -- Check changes
       changed <- checkHashChanged (z,x,toXyzY y z) newdta
-      if | changed -> do
+      if changed then do
             -- Call job action
             saveAction (pos, newdta)
             liftIO $ CNT.inc changecnt
-          | otherwise -> liftIO $ CNT.inc skipcnt
+        else liftIO $ CNT.inc skipcnt
       addHash (z,x,toXyzY y z) newdta
 
     liftWithPool n f =
@@ -381,7 +377,7 @@ runFilterJob pool mstyle mdownspec rtlconvert saveAction = do
         withPool n $ \dbpool -> runInIO (f dbpool)
     parallelFor_ pool_ parlist job =
       withRunInIO $ \runInIO ->
-        (parallel_ pool_) (runInIO . job <$> parlist)
+        parallel_ pool_ (runInIO . job <$> parlist)
 
     whenNothing Nothing f = f
     whenNothing _ _       = return ()
@@ -426,13 +422,12 @@ runPublishJob mstyle mdownspec rtlconvert
   manager <- newManager tlsManagerSettings{managerConnCount=conncount, managerIdleConnectionCount=conncount}
   -- Generate AWS environ; fake AWS keys when publishing to filesystem
   let credential = case pStoreTgt of
-                    PublishFs{} -> FromKeys (AccessKey "fake") (SecretKey "fake") -- Fake it if we publish to FS
-                    PublishS3{} -> Discover
-  env <- newEnv credential
-        <&> maybe id (\host -> configure (setEndpoint True host 443 s3)) pS3Endpoint
-        <&> envManager .~ manager
+                    PublishFs{} -> pure . fromKeys (AccessKey "fake") (SecretKey "fake") -- Fake it if we publish to FS
+                    PublishS3{} -> discover
+  env <- newEnvFromManager manager credential
+        <&> maybe id (\host -> configureService (S3.defaultService & setEndpoint True host 443)) pS3Endpoint
 
-  dbpool <- DP.createPool (SQL.open pMbtiles) SQL.close 1 100 conncount
+  dbpool <- DP.newPool (DP.defaultPoolConfig (SQL.open pMbtiles) SQL.close 10 100)
   modstr <- runMb dbpool $ makeModtimeStr (snd <$> mstyle)
 
   withThreads $ \pool -> do
@@ -456,8 +451,8 @@ runPublishJob mstyle mdownspec rtlconvert
                   exists <- doesFileExist fpath
                   when exists (removeFile fpath)
                 PublishS3 bucket ->
-                  runResourceT (runAWS env $
-                      void $ send (deleteObject bucket (ObjectKey (cs dstpath)))
+                  runResourceT (
+                      void $ send env (newDeleteObject bucket (ObjectKey (cs dstpath)))
                     ) `catchAny` \e -> liftIO (print e)
             Just (TileData newdta) ->
               case pStoreTgt of
@@ -466,20 +461,22 @@ runPublishJob mstyle mdownspec rtlconvert
                   createDirectoryIfMissing True (takeDirectory fpath)
                   BL.writeFile fpath newdta
                 PublishS3 bucket ->
-                  runResourceT $ runAWS env $ do
-                    let cmd = putObject bucket (ObjectKey (cs dstpath)) (toBody newdta)
-                              & poContentType ?~ "application/x-protobuf"
-                              & poContentEncoding ?~ "gzip"
-                              & poCacheControl ?~ "max-age=31536000"
-                    void $ send cmd
+                  runResourceT $ do
+                    let cmd = (newPutObject bucket (ObjectKey (cs dstpath)) (toBody newdta)) {
+                              contentType = Just "application/x-protobuf"
+                            , contentEncoding = Just "gzip"
+                            , cacheControl = Just "max-age=31536000"
+                        }
+                    void $ send env cmd
       meta <- genMetadata (cs modstr) (cs pUrlPrefix)
       case pStoreTgt of
         PublishFs root -> liftIO $ BL.writeFile (root </> "metadata.json") (AE.encode meta)
         PublishS3 bucket -> do
-          let cmd = putObject bucket "metadata.json" (toBody (AE.encode meta))
-                    & poContentType ?~ "application/json"
-          runResourceT $ runAWS env $
-            void (send cmd)
+          let cmd = (newPutObject bucket "metadata.json" (toBody (AE.encode meta))) {
+                    contentType = Just "application/json"
+                }
+          runResourceT $
+            void (send env cmd)
   where
     mkPath (z'@(Zoom z), Column x, tms_y) =
       let (XyzRow xyz_y) = toXyzY tms_y z'
@@ -505,7 +502,7 @@ fetchDownTiles _ _ = return []
 -- | Run a web server serving filtered/unfiltered tiles and metadata
 runWebServer :: Int -> Maybe (MapboxStyle, EpochTime) -> Maybe DownCopySpec -> Bool -> FilePath -> IO ()
 runWebServer port mstyle mdownspec rtlconvert mbpath = do
-  dbpool <- DP.createPool (SQL.open mbpath) SQL.close 1 100 100
+  dbpool <- DP.newPool (DP.defaultPoolConfig (SQL.open mbpath) SQL.close 10 100)
 
   -- Generate a JSON to be included as a metadata file
   -- Run a web server
@@ -520,9 +517,9 @@ runWebServer port mstyle mdownspec rtlconvert mbpath = do
         addHeader "Access-Control-Allow-Origin" "*"
         json metaJson
     get "/tiles/:z/:x/:y" $ do
-        z@(Zoom z') <- param "z"
-        x <- param "x"
-        y <- param "y"
+        z@(Zoom z') <- pathParam "z"
+        x <- pathParam "x"
+        y <- pathParam "y"
         let tms_y = toTmsY y z
 
         addHeader "Access-Control-Allow-Origin" "*"
@@ -539,7 +536,7 @@ runWebServer port mstyle mdownspec rtlconvert mbpath = do
               case mstyle of
                 Nothing -> return (Just dta)
                 Just (style,_) -> do
-                  (tdta, tuptiles) <- either (raise .cs) return (parseTiles dta duptiles)
+                  (tdta, tuptiles) <- either (fail . cs) return (parseTiles dta duptiles)
                   let res = filterTile rtlconvert z' style (copyDown mdownspec tdta tuptiles)
                   return (compressWith compressParams . cs . untile <$> checkEmptyTile res)
             _ -> return Nothing
