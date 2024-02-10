@@ -40,7 +40,6 @@ instance AE.FromJSON ULabel where
 data UExpF r =
   UNum Scientific
   | UStr T.Text
-  | UStrArr [T.Text]
   | UBool Bool
   | UNumArr NumArray
   | UVar Id
@@ -54,7 +53,6 @@ type UExp = Fix UExpF
 instance Show1 UExpF where
   liftShowsPrec _ _ d (UNum n) = showParen (d > 10) $ showString "UNum " . showsPrec 11 n
   liftShowsPrec _ _ d (UStr n) = showParen (d > 10) $ showString "UStr " . showsPrec 11 n
-  liftShowsPrec _ _ d (UStrArr n) = showParen (d > 10) $ showString "UStrArr " . showsPrec 11 n
   liftShowsPrec _ _ d (UBool n) = showParen (d > 10) $ showString "UBool " . showsPrec 11 n
   liftShowsPrec _ _ d (UVar n) = showParen (d > 10) $ showString "UVar " . showsPrec 11 n
   liftShowsPrec _ _ d (UNumArr n) = showParen (d > 10) $ showString "UNumArr " . showsPrec 11 n
