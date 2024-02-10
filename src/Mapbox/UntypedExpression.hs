@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE InstanceSigs #-}
 
 -- | Untyped expression parser for the mapbox style expressions
 module Mapbox.UntypedExpression where
@@ -15,10 +16,26 @@ import Data.Fix (Fix(..))
 import           Data.Scientific       (Scientific)
 import qualified Data.Text             as T
 import qualified Data.Vector           as V
+import Data.Aeson.Types (Parser)
 
 type Id = T.Text
 
 type NumArray = V.Vector Scientific
+
+data ULabel =
+    LStr T.Text
+  | LStrArr [T.Text]
+  | LBool Bool
+  | LNumArr NumArray
+  | LNum Scientific
+  deriving (Show)
+
+instance AE.FromJSON ULabel where
+  parseJSON v = LStr <$> AE.parseJSON v
+              <|> LStrArr <$> AE.parseJSON v
+              <|> LNum <$> AE.parseJSON v
+              <|> LNumArr <$> AE.parseJSON v
+              <|> LBool <$> AE.parseJSON v
 
 data UExpF r =
   UNum Scientific
@@ -28,6 +45,7 @@ data UExpF r =
   | UNumArr NumArray
   | UVar Id
   | UApp Id [r]
+  | UMatch r [(ULabel,r)] r
   | ULet Id r r
   | UFunction { ufProperty :: Maybe T.Text } -- Function - we should have 'base', 'stops' etc., currently unimplemented
   deriving (Show, Functor)
@@ -47,9 +65,14 @@ instance Show1 UExpF where
       showString "UApp " . showsPrec 11 tid . showString " "
       . mconcat (map (\l -> showChar ' ' . sp 11 l) lst)
   liftShowsPrec _ _ d (UFunction pid) = showParen (d > 10) $ showString "UFunction " . showsPrec 11 pid
+  liftShowsPrec sp _ d (UMatch inp lst lelse) =  showParen (d > 10) $
+      showString "UApp " . showString "match" . showString " "
+      . sp 11 inp . mconcat (map (\(l,v) -> showChar '(' . showString (show l) . showChar ',' . sp 11 v . showChar ')') lst)
+      . sp 11 lelse
 
 
 instance AE.FromJSON1 UExpF where
+  liftParseJSON :: forall a. (AE.Value -> Parser a) -> (AE.Value -> Parser [a]) -> AE.Value -> Parser (UExpF a)
   liftParseJSON parse _ = uparse
     where
       uparse (AE.String str) = return (UStr str)
@@ -79,4 +102,18 @@ instance AE.FromJSON1 UExpF where
           letexpr _ = fail "Invalid let expression"
           varexpr [AE.String nm] = return (UVar nm)
           varexpr _              = fail "Invalid var expression"
-          matchexpr args = UApp "match" <$> traverse parse args
+
+          matchexpr (idn:rest) = do
+            inp <- parse idn
+            (tbl, lastArg) <- parseMatchTable [] rest
+            lelse <- parse lastArg
+            return $ UMatch inp tbl lelse
+          matchexpr args = fail ("Invalid match arguments: " <> show args)
+
+          parseMatchTable :: [(ULabel, a)] -> [AE.Value] -> Parser ([(ULabel, a)], AE.Value)
+          parseMatchTable tbl [dlast] = return (tbl, dlast)
+          parseMatchTable tbl (lbl:v:rest) = do
+              dlabel <- AE.parseJSON lbl
+              dval <- parse v
+              parseMatchTable ((dlabel, dval):tbl) rest
+          parseMatchTable _ [] = fail "Wrong number of arguments to match"

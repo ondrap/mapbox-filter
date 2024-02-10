@@ -171,17 +171,17 @@ hasEquality TTNumArr = HasEq
 hasEquality TTAny = HasEq
 
 -- | Hacky conversion of literal/array of literals to list of literals; check type
-convertMatchLabel :: TTyp a -> UExp -> Either T.Text [a]
-convertMatchLabel TTNum (Fix (UNum n)) = Right [n]
-convertMatchLabel TTNum (Fix (UNumArr arr)) = Right (toList arr)
-convertMatchLabel TTStr (Fix (UStr s)) = Right [s]
-convertMatchLabel TTStr (Fix (UStrArr args)) = Right args
-convertMatchLabel TTBool (Fix (UBool b)) = Right [b]
-convertMatchLabel TTAny (Fix (UNum n)) = Right [ANum n]
-convertMatchLabel TTAny (Fix (UNumArr arr)) = Right (ANum <$> toList arr)
-convertMatchLabel TTAny (Fix (UStr s)) = Right [AStr s]
-convertMatchLabel TTAny (Fix (UStrArr args)) = Right (AStr <$> args)
-convertMatchLabel TTAny (Fix (UBool b)) = Right [ABool b]
+convertMatchLabel :: TTyp a -> ULabel -> Either T.Text [a]
+convertMatchLabel TTNum (LNum n) = Right [n]
+convertMatchLabel TTNum (LNumArr arr) = Right (toList arr)
+convertMatchLabel TTStr (LStr s) = Right [s]
+convertMatchLabel TTStr (LStrArr args) = Right args
+convertMatchLabel TTBool (LBool b) = Right [b]
+convertMatchLabel TTAny (LNum n) = Right [ANum n]
+convertMatchLabel TTAny (LNumArr arr) = Right (ANum <$> toList arr)
+convertMatchLabel TTAny (LStr s) = Right [AStr s]
+convertMatchLabel TTAny (LStrArr args) = Right (AStr <$> args)
+convertMatchLabel TTAny (LBool b) = Right [ABool b]
 convertMatchLabel _ arg = Left (cs $ "Impossible match label: " <> show arg)
 
 -- | Check that the input expression conforms to the requested type
@@ -205,6 +205,15 @@ typeCheck env (Fix (UVar var)) =
 typeCheck env (Fix (ULet var expr next)) = do
     res <- typeCheck env expr
     typeCheck (HMap.insert var res env) next
+typeCheck env (Fix (UMatch inpexp table lelse)) = do
+        (inp ::: intype) <- typeCheck env inpexp
+        (def ::: outtype) <- typeCheck env lelse
+        let evalpair (a,b) = (,) <$> convertMatchLabel intype a
+                                 <*> (typeCheck env b >>= forceType outtype)
+        pairs <- traverse evalpair table
+        -- Add Eq constraint
+        case hasEquality intype of
+          HasEq -> return (TMatch inp pairs def ::: outtype)
 typeCheck env (Fix (UApp fname args)) =
   case fname of
     "string" -> do
@@ -231,17 +240,6 @@ typeCheck env (Fix (UApp fname args)) =
     "!" | [arg] <- args -> do
         mexpr <- typeCheck env arg >>= forceType TTBool
         return (TNegate mexpr ::: TTBool)
-    "match" | (inpexp:rest) <- args, odd (length rest) -> do
-        (inp ::: intype) <- typeCheck env inpexp
-        (def ::: outtype) <- typeCheck env (last rest)
-        let mkpairs (a:b:prest) = (a,b) : mkpairs prest
-            mkpairs _ = []
-        let evalpair (a,b) = (,) <$> convertMatchLabel intype a
-                                 <*> (typeCheck env b >>= forceType outtype)
-        pairs <- traverse evalpair (mkpairs (init rest))
-        -- Add Eq constraint
-        case hasEquality intype of
-          HasEq -> return (TMatch inp pairs def ::: outtype)
     "has" | [arg] <- args -> do
         mname <- typeCheck env arg >>= forceType TTStr
         return (TCheckMeta mname ::: TTBool)
