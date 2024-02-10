@@ -5,14 +5,13 @@
 module Types where
 
 import qualified Data.ByteString.Lazy             as BL
-import qualified Data.Text                        as T
 import           Database.SQLite.Simple.FromField (FromField (..))
 import           Database.SQLite.Simple.ToField   (ToField (..))
 import           Web.Scotty                       (Parsable)
 import           Control.Newtype                  (Newtype(..))
 import           Data.Coerce                      (coerce)
 
-newtype TileId = TileId T.Text
+newtype TileId = TileId Int
   deriving (Show, ToField, FromField)
 
 newtype TileData = TileData {

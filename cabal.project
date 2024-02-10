@@ -1,0 +1,12 @@
+packages: . 
+
+source-repository-package
+    type: git
+    location: https://github.com/k-bx/protocol-buffers.git
+    tag: ae8084f115fbdb699da2b2a163776b1a1167bf0f
+
+
+source-repository-package
+    type: git
+    location: https://github.com/ondrap/vectortiles.git
+    tag: 818f2733582b7ba46f8414b80a4085753d3e6073

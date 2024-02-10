@@ -10,7 +10,7 @@ parser for the Mapbox GL JS style and an executable that can:
 - Run a webserver for
   * serving the tiles from the `mbtile` file
   * serving the real-time filtered tiles
-  * after serving a tile saving the compressed tile back to the database (Openmaptiles database only is currently supported in this mode)
+  * after serving a tile saving the compressed tile back to the database (Planetiler database only is currently supported in this mode)
 - Publish tiles to S3 so that you don't need to run a webserver at all. As this can
   take a very long time, incremental, differential and parallel upload is supported.
 
@@ -23,7 +23,7 @@ be displayed. Then it removes metadata that is not used in the styles. The remov
 process is currently somewhat crude (it retains all metadata used at the particular layer),
 but it should be enough for most usecases.
 
-Currently only the openmaptiles.org mbtile files are supported for `filter` and `publish` commands.
+Currently only the Planetiler mbtile files are supported for `filter` and `publish` commands.
 The `web` command should be compatibile with any mbtile file.
 
 ## How to compile

@@ -65,7 +65,7 @@ class MonadIO m => HasMd5Queue m where
 
 fetchTileTid :: (Monad m, HasMbConn m) => TileId -> m (Maybe TileData)
 fetchTileTid tid = do
-  tres <- mbQuery "select tile_data from images where tile_id=?" (Only tid)
+  tres <- mbQuery "select tile_data from tiles_data where tile_data_id=?" (Only tid)
   case tres of
     [Only tdata] -> return (Just tdata)
     _            -> return Nothing
@@ -80,16 +80,16 @@ fetchTileZXY (z,x,y) = do
 
 getZooms :: (Monad m, HasMbConn m) => m [Zoom]
 getZooms =
-  fmap fromOnly <$> mbQuery_ "select distinct zoom_level from tiles order by zoom_level"
+  fmap fromOnly <$> mbQuery_ "select distinct zoom_level from tiles_shallow order by zoom_level"
 
 getTotalCount :: (Monad m, HasMbConn m, MonadFail m) => m Int
 getTotalCount = do
-  [Only total_count] <- mbQuery_ "select count(*) from tiles"
+  [Only total_count] <- mbQuery_ "select count(*) from tiles_shallow"
   return total_count
 
 getColTiles :: (Monad m, HasMbConn m) => Zoom -> Column -> m [(Zoom, Column, TmsRow, TileId)]
 getColTiles z x = do
-  let qry = "select zoom_level,tile_column,tile_row,tile_id from map where zoom_level=? AND tile_column=?"
+  let qry = "select zoom_level,tile_column,tile_row,tile_data_id from tiles_shallow where zoom_level=? AND tile_column=?"
   mbQuery qry (z, x)
 
 getMetaData :: (Monad m, HasMbConn m) => m [(T.Text, String)]
@@ -168,9 +168,9 @@ checkJobDb jobconn mbconn forceFull = do
         execute_ jobconn "drop table errors" `catchAny` \_ -> return ()
         execute_ jobconn "create table jobs (zoom_level int not null, tile_column int not null, tile_count int not null)"
         execute_ jobconn "create INDEX jobs_index ON jobs (zoom_level,tile_column)"
-        execute_ jobconn "create table errors (zoom_level int, tile_column int, tile_row int, tile_id text)"
+        execute_ jobconn "create table errors (zoom_level int, tile_column int, tile_row int, tile_id int)"
         putStrLn "Doing full database work, recreating job list"
-        jobs :: [StrictRowDesc] <- query_ mbconn "select zoom_level, tile_column, count(*) from map group by zoom_level, tile_column"
+        jobs :: [StrictRowDesc] <- query_ mbconn "select zoom_level, tile_column, count(*) from tiles group by zoom_level, tile_column"
         executeMany jobconn "insert into jobs(zoom_level,tile_column, tile_count) values (?,?,?)" jobs
         putStrLn "Job list done"
   where
@@ -204,10 +204,10 @@ instance WriteMbTile SingleDbRunner where
   updateMbtile (z,x,y,tid) mdata = do
     conn <- asks seMbConn
     liftIO $ case mdata of
-      Just tdata -> execute conn "update images set tile_data=? where tile_id=?" (tdata, tid)
+      Just tdata -> execute conn "update tiles_data set tile_data=? where tile_data_id=?" (tdata, tid)
       Nothing -> do
-        execute conn "delete from map where zoom_level=? AND tile_column=? AND tile_row=?" (z,x,y)
-        execute conn "delete from images where tile_id=?" (Only tid)
+        execute conn "delete from tiles_shallow where zoom_level=? AND tile_column=? AND tile_row=?" (z,x,y)
+        execute conn "delete from tiles_data where tile_data_id=?" (Only tid)
   vacuumDb = do
     conn <- asks seMbConn
     liftIO $ execute_ conn "vacuum"

@@ -349,28 +349,30 @@ runFilterJob pool mstyle mdownspec rtlconvert saveAction = do
   where
     processTile counter emptycnt changecnt skipcnt pos@(z@(Zoom z'),x,y,tileid) = do
       liftIO $ CNT.inc counter
-      -- We assume the tile exists in the db...
-      Just tiledta <- fetchTileTid tileid
-      -- Fetch downcopy tiles
-      duptiles <- fetchDownTiles mdownspec (z, x, toXyzY y z)
+      mtiledata <- fetchTileTid tileid
+      case mtiledata of
+        Nothing -> liftIO $ putStrLn ("Tile failed to read from DB: " <> show tileid)
+        Just tiledta -> do
+          -- Fetch downcopy tiles
+          duptiles <- fetchDownTiles mdownspec (z, x, toXyzY y z)
 
-      newdta <- case mstyle of
-            Nothing -> return (Just tiledta)
-            Just style -> do
-              let filtList = styleToCFilters z' style
-              let generr = liftIO . throwIO . userError . show
-              (tdta, tuptiles) <- either generr return (parseTiles (unTileData tiledta) duptiles)
-              let res = filterVectorTile rtlconvert filtList (copyDown mdownspec tdta tuptiles)
-              return (TileData . compressWith compressParams . cs . untile <$> checkEmptyTile res)
-      liftIO $ whenNothing newdta (CNT.inc emptycnt)
-      -- Check changes
-      changed <- checkHashChanged (z,x,toXyzY y z) newdta
-      if changed then do
-            -- Call job action
-            saveAction (pos, newdta)
-            liftIO $ CNT.inc changecnt
-        else liftIO $ CNT.inc skipcnt
-      addHash (z,x,toXyzY y z) newdta
+          newdta <- case mstyle of
+                Nothing -> return (Just tiledta)
+                Just style -> do
+                  let filtList = styleToCFilters z' style
+                  let generr = liftIO . throwIO . userError . show
+                  (tdta, tuptiles) <- either generr return (parseTiles (unTileData tiledta) duptiles)
+                  let res = filterVectorTile rtlconvert filtList (copyDown mdownspec tdta tuptiles)
+                  return (TileData . compressWith compressParams . cs . untile <$> checkEmptyTile res)
+          liftIO $ whenNothing newdta (CNT.inc emptycnt)
+          -- Check changes
+          changed <- checkHashChanged (z,x,toXyzY y z) newdta
+          if changed then do
+                -- Call job action
+                saveAction (pos, newdta)
+                liftIO $ CNT.inc changecnt
+            else liftIO $ CNT.inc skipcnt
+          addHash (z,x,toXyzY y z) newdta
 
     liftWithPool n f =
       withRunInIO $ \runInIO ->
