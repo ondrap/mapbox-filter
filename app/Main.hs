@@ -4,6 +4,10 @@
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE ViewPatterns        #-}
 {-# LANGUAGE FlexibleContexts        #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE TupleSections #-}
 
 module Main where
 
@@ -47,8 +51,9 @@ import           Data.Traversable                     (for)
 import           Database.SQLite.Simple               (Only (..), query_,
                                                        withConnection)
 import qualified Database.SQLite.Simple               as SQL
+import qualified Geography.VectorTile                 as VT
 import           Geography.VectorTile                 (layers, linestrings,
-                                                       metadata, name, points,
+                                                       metadata, points,
                                                        polygons, tile, untile,
                                                        VectorTile,
                                                        featureId)
@@ -65,11 +70,11 @@ import           Network.HTTP.Client.TLS              (tlsManagerSettings)
 import           Options.Applicative                  hiding (header, style)
 import           System.Directory                     (createDirectoryIfMissing,
                                                        doesFileExist,
-                                                       removeFile)
+                                                       removeFile, listDirectory)
 import           System.FilePath.Posix                (takeDirectory, (</>))
 import qualified System.Metrics.Counter               as CNT
 import           System.Posix.Files                   (getFileStatus,
-                                                       modificationTime)
+                                                       modificationTime, fileExist)
 import           System.Posix.Types                   (EpochTime)
 import           Text.Read                            (readMaybe)
 import           UnliftIO                             (MonadUnliftIO, catchAny,
@@ -92,6 +97,8 @@ import qualified Amazonka.S3 as S3
 import Amazonka.Auth (fromKeys)
 import qualified Data.Aeson.KeyMap as AEK
 import qualified Data.Aeson.Key as AEK
+import GHC.Generics (Generic)
+import Data.List (sort)
 
 data PublishTarget = PublishFs FilePath | PublishS3 BucketName
   deriving (Show)
@@ -138,6 +145,10 @@ data CmdLine =
   | CmdConvert {
       fStyle :: FilePath
   }
+  | CmdCreateMb {
+      fInputDir :: FilePath
+    , fMbtiles :: FilePath
+  }
 
 -- | The same as 'some', but generate NonEmpty list (makes more sense)
 nsome :: Alternative f => f a -> f (NonEmpty a)
@@ -171,6 +182,11 @@ convertOptions :: Parser CmdLine
 convertOptions =
   CmdConvert <$> argument str (metavar "FILENAME" <> help "Style source")
 
+createMbOptions :: Parser CmdLine
+createMbOptions =
+  CmdCreateMb <$> argument str (metavar "DIRECTORY" <> help "Input directory")
+              <*> argument str (metavar "MBTILE" <> help "Output MBTILE file")
+
 s3Bucket :: ReadM PublishTarget
 s3Bucket = maybeReader s3Reader <|> maybeReader (Just . PublishFs)
   where
@@ -196,6 +212,7 @@ publishOptions =
       <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
     )
 
+
 cmdLineParser  :: Parser CmdLine
 cmdLineParser =
   subparser $
@@ -203,8 +220,9 @@ cmdLineParser =
     <> command "filter" (info (helper <*> mbtileOptions) (progDesc "Run filtering on a MBTiles database"))
     <> command "web" (info (helper <*> webOptions) (progDesc "Run a web server for serving tiles"))
     <> command "publish" (info (helper <*> publishOptions) (progDesc "Publish mbtile to S3"))
-    <> command "convert-old-filter" (info (helper <*> convertOptions) 
+    <> command "convert-old-filter" (info (helper <*> convertOptions)
                                     (progDesc "Convert style with deprecated filter to new filter"))
+    <> command "create-mbtile" (info (helper <*> createMbOptions) (progDesc "Create mbtile files "))
 
 progOpts :: ParserInfo CmdLine
 progOpts = info (cmdLineParser <**> helper)
@@ -277,8 +295,8 @@ dumpPbf style zoom fp = do
     Right vtile ->
       for_ (vtile ^.. layers . traverse) $ \l -> do
           T.putStrLn "-----------------------------"
-          T.putStrLn ("Layer: " <> cs (l ^. name))
-          let lfilter = cfExpr (getLayerFilter False (l ^. name) cfilters)
+          T.putStrLn ("Layer: " <> cs (l ^. VT.name))
+          let lfilter = cfExpr (getLayerFilter False (l ^. VT.name) cfilters)
           for_ (l ^. points) (printCont lfilter Point)
           for_ (l ^. linestrings) (printCont lfilter LineString)
           for_ (l ^. polygons) (printCont lfilter Polygon)
@@ -304,7 +322,7 @@ checkEmptyTile :: VectorTile -> Maybe VectorTile
 checkEmptyTile t
   | null (t ^. layers)  = Nothing
   | otherwise = Just t
-  
+
 
 -- | Run a filtering action on all tiles in the database and perform a JobAction
 runFilterJob ::
@@ -417,7 +435,7 @@ runPublishJob ::
   -> Bool
   -> PublishOpts
   -> IO ()
-runPublishJob mstyle mdownspec rtlconvert 
+runPublishJob mstyle mdownspec rtlconvert
       PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint, pDiffHashes} = do
   -- Create http connection manager with higher limits
   conncount <- maybe getNumCapabilities return pThreads
@@ -435,7 +453,7 @@ runPublishJob mstyle mdownspec rtlconvert
   withThreads $ \pool -> do
     let hashfile = pMbtiles <> ".hashes"
     let pConf = ParallelConfig {
-        pConnCount = conncount 
+        pConnCount = conncount
       , pJobPath = pMbtiles <> "." <> modstr
       , pMd5Path = hashfile
       , pOldMd5Path = pDiffHashes
@@ -496,7 +514,7 @@ makeModtimeStr mtime = do
 
 fetchDownTiles :: HasMbConn m => Maybe DownCopySpec -> (Zoom, Column, XyzRow) -> m [(TileData, (Int, Int))]
 fetchDownTiles (Just spec) (z, x, y) | spec ^. dDstZoom == unpack z = do
-  let newtiles = [((z + 1, 2 * x + Column bx, toTmsY (2 * y + XyzRow by) (z + 1)), (bx, by)) 
+  let newtiles = [((z + 1, 2 * x + Column bx, toTmsY (2 * y + XyzRow by) (z + 1)), (bx, by))
                   | bx <- [0..1], by <- [0..1]]
   mapMaybe (sequenceOf _1) <$> traverseOf (traverse . _1) fetchTileZXY newtiles
 fetchDownTiles _ _ = return []
@@ -567,6 +585,87 @@ runConversion fname = do
         Left err -> error ("Conversion error: " <> err)
         Right res -> BL8.putStrLn (encodePretty res)
 
+data SimpleMetadata = SimpleMetadata {
+    name :: T.Text
+  , format :: T.Text
+  , minzoom :: Maybe Int
+  , maxzoom :: Maybe Int
+  , center :: Maybe (Double,Double,Double)
+  , bounds :: Maybe (Double,Double,Double,Double)
+  , attribution :: Maybe T.Text
+  , description :: Maybe T.Text
+  -- We skip 'type' because it breaks generic decoding...
+  , version :: Maybe T.Text
+  , vector_layers :: Maybe AE.Value
+} deriving (Show, Generic, AE.FromJSON)
+
+-- | Create an MBTile file from a published directory
+createMbtile :: FilePath -> FilePath -> IO ()
+createMbtile inp outp = do
+  -- Check that mbtile doesn't exist
+  exists <- fileExist outp
+  when exists $ do
+    throwIO $ userError "The output file already exists."
+  lmeta <- AE.eitherDecodeFileStrict (inp </> "metadata.json")
+  (meta :: SimpleMetadata) <- either (throwIO . userError) return lmeta
+
+  -- Create a new sqlite db, add tables
+  withConnection outp $ \conn -> do
+    createTables conn
+    -- Create metadata information
+    createMetadata conn meta
+    -- Insert existing fields
+    insertTiles conn (inp </> "tiles") (cs meta.format)
+  where
+    createTables conn = do
+      SQL.execute_ conn "CREATE TABLE metadata (name text, value text)"
+      SQL.execute_ conn "CREATE TABLE tiles (zoom_level integer, tile_column integer, tile_row integer, tile_data blob)"
+      SQL.execute_ conn "CREATE UNIQUE INDEX tile_index on tiles (zoom_level, tile_column, tile_row)"
+    createMetadata conn meta = do
+      -- Mandatory fields
+      writeMetaField conn "name" meta.name
+      writeMetaField conn "format" meta.format
+      -- Should fields
+      for_ meta.minzoom $ \zoom -> writeMetaField conn "minzoom" (cs $ show zoom)
+      for_ meta.maxzoom $ \zoom -> writeMetaField conn "maxzoom" (cs $ show zoom)
+      for_ meta.center $ \(a,b,c) -> writeMetaField conn "center" (cs $ show a <> "," <> show b <> "," <> show c)
+      for_ meta.bounds $ \(a,b,c,d) -> writeMetaField conn "center" (cs $ show a <> "," <> show b <> "," <> show c <> "," <> show d)
+      -- Optional fields
+      for_ meta.attribution $ writeMetaField conn "version"
+      for_ meta.description $ writeMetaField conn "version"
+      for_ meta.version $ writeMetaField conn "version"
+      -- Vector
+      for_ meta.vector_layers $ \vjson -> writeMetaField conn "json" (cs $ AE.encode (AEK.singleton "vector_layers" vjson))
+
+    writeMetaField :: SQL.Connection -> T.Text -> T.Text -> IO ()
+    writeMetaField conn field val =
+      SQL.execute conn "INSERT INTO metadata(name,value) VALUES (?,?)" (field, val)
+
+    insertTiles :: SQL.Connection -> FilePath -> String -> IO ()
+    insertTiles conn basedir suffix = do
+      zooms <- listDirNums basedir
+      for_ (sort zooms) $ \zoom -> do
+        putStrLn ("Working on zoom: " <> show zoom)
+        xs <- listDirNums (basedir </> show zoom)
+        for_ (sort xs) $ \x -> do
+          ys <- listFileNums (basedir </> show zoom </> show x) suffix
+          for_ (sort ys) $ \(yfname, y) -> do
+            content <- BS.readFile (basedir  </> show zoom </> show x </> yfname)
+            let tmsY = toTmsY (XyzRow y) (Zoom zoom)
+            SQL.execute conn "INSERT INTO tiles (zoom_level,tile_column,tile_row,tile_data) values (?,?,?,?)" (zoom,x, tmsY, content)
+
+    -- List files in directory that are convertible to an integer
+    listDirNums :: FilePath -> IO [Int]
+    listDirNums fpath = mapMaybe readMaybe <$> listDirectory fpath
+
+    -- List numbers of files with a given suffix
+    listFileNums :: FilePath -> String -> IO [(FilePath,Int)]
+    listFileNums fpath suffix = do
+      dfiles <- listDirectory fpath
+      return $ mapMaybe (\f -> (f,) <$> decodeFname f) dfiles
+      where
+        decodeFname fname = readMaybe fname <|> (BS.stripSuffix (cs $ "." <> suffix) (cs fname) >>= readMaybe . cs)
+
 main :: IO ()
 main = do
   opts <- execParser progOpts
@@ -589,6 +688,7 @@ main = do
         downspec <- readCopyDown fCopyDown
         runPublishJob mstyle downspec fRtlConvert fPublishOpts
     CmdConvert{fStyle} -> runConversion fStyle
+    CmdCreateMb{fInputDir,fMbtiles} -> createMbtile fInputDir fMbtiles
   where
     -- We need to adjust minZoom in the styles to be at least the maximum zoom level
     -- in the database
@@ -609,4 +709,3 @@ main = do
       case AE.eitherDecodeStrict fspec of
         Right res -> return res
         Left err  -> error ("Parsing copydown style failed: " <> err)
-  

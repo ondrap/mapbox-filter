@@ -1,3 +1,4 @@
+cabal-version:       3.6
 name:           mapbox-filter
 version:        0.1.0.0
 description:    Tools for working with vector Mapbox mbtiles files
@@ -6,10 +7,9 @@ bug-reports:    https://github.com/ondrap/mapbox-filter/issues
 author:         Ondrej Palkovsky
 maintainer:     palkovsky.ondrej@gmail.com
 copyright:      2018 Ondrej Palkovsky
-license:        BSD3
+license:        BSD-3-Clause
 license-file:   LICENSE
 build-type:     Simple
-cabal-version:  >= 1.10
 
 extra-source-files:
     ChangeLog.md
@@ -19,48 +19,17 @@ source-repository head
   type: git
   location: https://github.com/ondrap/mapbox-filter
 
-library
-  hs-source-dirs:
-      src
+
+common deps
   build-depends:
       base >=4.7 && <5
-    , vectortiles >= 1.4.0
-    , bytestring
-    , unordered-containers
     , aeson >= 2.1
     , scientific
-    , text
-    , vector
-    , transformers
-    , lens
-    , string-conversions
-    , zlib
     , recursion-schemes
-    , text-icu
+    , text-icu >= 0.8.0.4
     , data-fix
-  exposed-modules:
-      Mapbox.Expression
-      Mapbox.Style
-      Mapbox.Interpret
-      Mapbox.Filters
-      Mapbox.UntypedExpression
-      Mapbox.OldStyleConvert
-      Mapbox.DownCopy
-  default-language: Haskell2010
-  ghc-options: -Wall -Wcompat
-
-executable mapbox-filter
-  main-is: Main.hs
-  other-modules: DbAccess, Md5Worker, Types
-  hs-source-dirs:
-      app
-  ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
-  build-depends:
-      base >=4.7 && <5
-    , mapbox-filter
     , string-conversions
     , unordered-containers
-    , aeson
     , vectortiles >= 1.4.0
     , text
     , lens
@@ -90,4 +59,30 @@ executable mapbox-filter
     , aeson-pretty
     , lens-aeson
     , newtype
+
+
+library
+  import: deps
+  hs-source-dirs:
+      src
+  exposed-modules:
+      Mapbox.Expression
+      Mapbox.Style
+      Mapbox.Interpret
+      Mapbox.Filters
+      Mapbox.UntypedExpression
+      Mapbox.OldStyleConvert
+      Mapbox.DownCopy
+  default-language: Haskell2010
+  ghc-options: -Wall -Wcompat
+
+executable mapbox-filter
+  import: deps
+  main-is: Main.hs
+  other-modules: DbAccess, Md5Worker, Types
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      mapbox-filter
   default-language: Haskell2010

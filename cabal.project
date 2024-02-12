@@ -1,5 +1,9 @@
 packages: . 
 
+package text-icu
+  extra-include-dirs: /opt/homebrew/Cellar/icu4c/73.2/include
+  extra-lib-dirs: /opt/homebrew/Cellar/icu4c/73.2/lib
+
 source-repository-package
     type: git
     location: https://github.com/k-bx/protocol-buffers.git
