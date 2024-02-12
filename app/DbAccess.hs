@@ -6,6 +6,7 @@
 {-# LANGUAGE StandaloneDeriving         #-}
 {-# LANGUAGE TypeApplications           #-}
 {-# LANGUAGE NamedFieldPuns         #-}
+{-# LANGUAGE LambdaCase #-}
 
 module DbAccess where
 
@@ -28,6 +29,7 @@ import           UnliftIO                       (MonadUnliftIO (..))
 
 import           Md5Worker
 import           Types
+import Data.Foldable (for_)
 
 class MonadIO m => HasMbConn m where
   {-# MINIMAL withMbConn #-}
@@ -239,7 +241,7 @@ runMb pool (MbRunner code) = runReaderT code pool
 data ParallelEnv = ParallelEnv {
     peMbPool   :: DP.Pool Connection
   , peJobConn  :: Connection
-  , peMd5Queue :: Md5Queue
+  , peMd5Queue :: Maybe Md5Queue
 }
 
 newtype ParallelDbRunner a = ParallelDbRunner {
@@ -267,17 +269,19 @@ instance HasJobConn ParallelDbRunner where
 
 instance HasMd5Queue ParallelDbRunner where
   checkHashChanged param tile = do
-    q <- asks peMd5Queue
-    liftIO $ tileChanged q param tile
+    asks peMd5Queue >>= \case
+      Nothing -> return True
+      Just q -> liftIO $ tileChanged q param tile
   addHash _ Nothing = return ()
   addHash param (Just tile) = do
-    q <- asks peMd5Queue
-    liftIO $ sendMd5Tile q param tile
+    mq <- asks peMd5Queue 
+    for_ mq $ \q ->
+      liftIO $ sendMd5Tile q param tile
 
 data ParallelConfig = ParallelConfig {
     pConnCount :: Int
   , pJobPath :: FilePath
-  , pMd5Path :: FilePath
+  , pMd5Path :: Maybe FilePath
   , pOldMd5Path :: Maybe FilePath
 }
 
@@ -286,7 +290,9 @@ runParallelDb ParallelConfig{pConnCount, pJobPath, pMd5Path, pOldMd5Path} forceF
                 mbpool (ParallelDbRunner code) =
   withConnection pJobPath $ \jobconn -> do
     DP.withResource mbpool $ \conn -> checkJobDb jobconn conn forceFull
-    md5queue <- runQueueThread pOldMd5Path pMd5Path pConnCount
+    md5queue <- case pMd5Path of
+      Nothing -> return Nothing
+      Just mpath -> Just <$> runQueueThread pOldMd5Path mpath pConnCount
     res <- runReaderT code (ParallelEnv mbpool jobconn md5queue)
-    stopMd5Queue md5queue
+    for_ md5queue stopMd5Queue 
     return res

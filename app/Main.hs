@@ -109,6 +109,7 @@ data PublishOpts = PublishOpts {
   , pThreads    :: Maybe Int
   , pForceFull  :: Bool
   , pS3Endpoint :: Maybe BS.ByteString
+  , pDisableHashes :: Bool
   , pDiffHashes :: Maybe FilePath
   , pMbtiles    :: FilePath
 }
@@ -208,6 +209,7 @@ publishOptions =
       <*> optional (option auto (short 'p' <> long "parallelism" <> metavar "NUMBER" <> help "Spawn multiple threads for faster upload (default: number of cores)"))
       <*> switch (short 'f' <> long "force-full" <> help "Force full recomputation")
       <*> optional (strOption (long "s3-endpoint" <> metavar "HOSTNAME" <> help "Endpoint for S3 operations (use e.g. with Google Cloud Storage)"))
+      <*> switch (long "disable-hashes" <> help "Do not compute hash database of the tiles")
       <*> optional (strOption (long "hashes-db" <> metavar "SQLITE" <> help "Old hashes.db for differential upload"))
       <*> argument str (metavar "MBTILES" <> help "MBTile SQLite database")
     )
@@ -436,7 +438,7 @@ runPublishJob ::
   -> PublishOpts
   -> IO ()
 runPublishJob mstyle mdownspec rtlconvert
-      PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint, pDiffHashes} = do
+      PublishOpts{pMbtiles, pForceFull, pStoreTgt, pUrlPrefix, pThreads, pS3Endpoint, pDiffHashes, pDisableHashes} = do
   -- Create http connection manager with higher limits
   conncount <- maybe getNumCapabilities return pThreads
   manager <- newManager tlsManagerSettings{managerConnCount=conncount, managerIdleConnectionCount=conncount}
@@ -455,7 +457,7 @@ runPublishJob mstyle mdownspec rtlconvert
     let pConf = ParallelConfig {
         pConnCount = conncount
       , pJobPath = pMbtiles <> "." <> modstr
-      , pMd5Path = hashfile
+      , pMd5Path = if pDisableHashes then Nothing else Just hashfile
       , pOldMd5Path = pDiffHashes
     }
     runParallelDb pConf pForceFull dbpool $ do
