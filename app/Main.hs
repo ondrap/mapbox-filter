@@ -592,7 +592,7 @@ data SimpleMetadata = SimpleMetadata {
   , format :: T.Text
   , minzoom :: Maybe Int
   , maxzoom :: Maybe Int
-  , center :: Maybe (Double,Double,Double)
+  , center :: Maybe (Double,Double,Int)
   , bounds :: Maybe (Double,Double,Double,Double)
   , attribution :: Maybe T.Text
   , description :: Maybe T.Text
@@ -631,7 +631,7 @@ createMbtile inp outp = do
       for_ meta.minzoom $ \zoom -> writeMetaField conn "minzoom" (cs $ show zoom)
       for_ meta.maxzoom $ \zoom -> writeMetaField conn "maxzoom" (cs $ show zoom)
       for_ meta.center $ \(a,b,c) -> writeMetaField conn "center" (cs $ show a <> "," <> show b <> "," <> show c)
-      for_ meta.bounds $ \(a,b,c,d) -> writeMetaField conn "center" (cs $ show a <> "," <> show b <> "," <> show c <> "," <> show d)
+      for_ meta.bounds $ \(a,b,c,d) -> writeMetaField conn "bounds" (cs $ show a <> "," <> show b <> "," <> show c <> "," <> show d)
       -- Optional fields
       for_ meta.attribution $ writeMetaField conn "version"
       for_ meta.description $ writeMetaField conn "version"
